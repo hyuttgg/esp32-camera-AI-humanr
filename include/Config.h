@@ -65,7 +65,7 @@ struct FirmwareConfig {
 #define MIN_SAFE_PSRAM_BYTES              65536  // Trigger warning if PSRAM < 64KB
 
 // Watchdog & Task Timeouts
-#define WATCHDOG_TIMEOUT_SECONDS          10     // TWDT timeout for camera/AI tasks
+#define WATCHDOG_TIMEOUT_SECONDS          30     // TWDT timeout (30s to allow HTTPS TLS handshakes to cloud)
 #define CAMERA_CAPTURE_TIMEOUT_MS         2500   // DMA frame timeout
 #define MAX_RECOVERY_ATTEMPTS             2      // Max consecutive recovery loops
 

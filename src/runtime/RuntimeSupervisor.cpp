@@ -505,13 +505,23 @@ void RuntimeSupervisor::handleRunning() {
     if (m_streamBinaryFrames) {
         taskYIELD();
     } else {
-        // Upload frame to Ocean Vision backend if human detected or every 10s
+        // Upload frame to Ocean Vision backend if human detected or every 6s
         static uint32_t lastUploadTime = 0;
-        if ((hasHuman && now - lastUploadTime >= 2000) || (now - lastUploadTime >= 10000)) {
+        if (lastUploadTime == 0 || (hasHuman && now - lastUploadTime >= 2000) || (now - lastUploadTime >= 6000)) {
+            WatchdogManager::feed();
             if (fb->format == PIXFORMAT_JPEG) {
                 m_netClient.uploadFrame(fb->buf, fb->len, fb->width, fb->height, hasHuman, humanResult.confidence, metrics.isBlackScreen);
                 lastUploadTime = now;
+            } else {
+                uint8_t *jpg_buf = nullptr;
+                size_t jpg_len = 0;
+                if (frame2jpg(fb, 30, &jpg_buf, &jpg_len) && jpg_buf) {
+                    m_netClient.uploadFrame(jpg_buf, jpg_len, fb->width, fb->height, hasHuman, humanResult.confidence, metrics.isBlackScreen);
+                    free(jpg_buf);
+                    lastUploadTime = now;
+                }
             }
+            WatchdogManager::feed();
         }
         vTaskDelay(pdMS_TO_TICKS(m_config.inference_interval_ms > 0 ? m_config.inference_interval_ms : 1));
     }
@@ -595,6 +605,7 @@ void RuntimeSupervisor::handleLimitedMode() {
 }
 
 void RuntimeSupervisor::step() {
+    WatchdogManager::feed();
     processSerialCommands();
     m_netClient.update();
     switch (m_state) {

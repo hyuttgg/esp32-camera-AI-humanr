@@ -37,7 +37,13 @@ loadUnifiedEnv();
 
 async function bootstrap() {
   const logger = new Logger('OceanVisionBootstrap');
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+  });
+
+  // Accept raw image/jpeg and application/octet-stream binary bodies up to 10MB from ESP32-CAM
+  app.useBodyParser('raw', { limit: '10mb', type: ['image/jpeg', 'image/jpg', 'application/octet-stream'] });
+  app.useBodyParser('json', { limit: '10mb' });
 
   // 1. Security Headers via Helmet
   app.use(

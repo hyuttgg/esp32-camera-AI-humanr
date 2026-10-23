@@ -194,9 +194,20 @@ export class IngestionController {
     @Headers() headers: any,
     @Request() req: any,
   ) {
-    const deviceId = headers['x-device-id'] || body.deviceId || 'ESP32-CAM-01';
-    const captureId = headers['x-capture-id'] || body.captureId || `cap-${Date.now()}`;
-    const rawBuffer = file ? file.buffer : (req.rawBody || Buffer.from(''));
+    const deviceId = headers['x-device-id'] || (body && body.deviceId) || 'ESP32-CAM-01';
+    const captureId = headers['x-capture-id'] || (body && body.captureId) || `cap-${Date.now()}`;
+    let rawBuffer: Buffer = Buffer.from('');
+    if (file && Buffer.isBuffer(file.buffer)) {
+      rawBuffer = file.buffer;
+    } else if (Buffer.isBuffer(req.rawBody)) {
+      rawBuffer = req.rawBody;
+    } else if (Buffer.isBuffer(body)) {
+      rawBuffer = body;
+    } else if (Buffer.isBuffer(req.body)) {
+      rawBuffer = req.body;
+    } else if (body && typeof body.imageBase64 === 'string') {
+      rawBuffer = Buffer.from(body.imageBase64, 'base64');
+    }
 
     if (!rawBuffer || rawBuffer.length < 100) {
       throw new BadRequestException('Empty or truncated JPEG payload');

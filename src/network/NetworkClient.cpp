@@ -1,4 +1,5 @@
 #include "NetworkClient.h"
+#include "WatchdogManager.h"
 #include <mbedtls/md.h>
 #include "esp_system.h"
 #include "esp_chip_info.h"
@@ -8,8 +9,12 @@
 #define FLASH_GPIO_PIN 4
 
 static bool beginHttpRequest(HTTPClient& http, WiFiClient& plainClient, WiFiClientSecure& secureClient, const String& url) {
+    WatchdogManager::feed();
+    http.setTimeout(4000);
+    http.setConnectTimeout(3500);
     if (url.startsWith("https://")) {
         secureClient.setInsecure();
+        secureClient.setTimeout(4);
         return http.begin(secureClient, url);
     }
     return http.begin(plainClient, url);
@@ -93,6 +98,7 @@ bool NetworkClient::sendHardwareTelemetry() {
 
     int code = http.POST(json);
     http.end();
+    WatchdogManager::feed();
     return (code == 200 || code == 201);
 }
 
@@ -345,6 +351,7 @@ bool NetworkClient::sendHeartbeat(uint32_t freeHeap, uint32_t freePsram, bool fl
 
     int code = http.POST(json);
     http.end();
+    WatchdogManager::feed();
     return (code == 200 || code == 201);
 }
 
@@ -374,6 +381,8 @@ bool NetworkClient::uploadFrame(const uint8_t* jpegBuf, size_t jpegLen, uint16_t
 
     int code = http.POST((uint8_t*)jpegBuf, jpegLen);
     http.end();
+    WatchdogManager::feed();
+    Serial.printf("[CLOUD-UPLOAD] JPEG %u bytes (%ux%u) -> HTTP %d\n", (unsigned)jpegLen, width, height, code);
     return (code == 200 || code == 201);
 }
 
@@ -418,22 +427,30 @@ void NetworkClient::update() {
 
     uint32_t now = millis();
 
-    // Hardware Telemetry stream every 3s (100% accurate CPU, DRAM, PSRAM, Flash)
-    if (now - m_lastTelemetryMs >= 3000) {
+    // Hardware Telemetry stream every 5s (100% accurate CPU, DRAM, PSRAM, Flash)
+    if (now - m_lastTelemetryMs >= 5000) {
         m_lastTelemetryMs = now;
+        WatchdogManager::feed();
         sendHardwareTelemetry();
+        WatchdogManager::feed();
+        return; // At most 1 HTTPS request per loop iteration to keep frame capture responsive
     }
 
     // Heartbeat every interval (default 30s)
     if (now - m_lastHeartbeatMs >= (m_config.heartbeat_interval_ms ? m_config.heartbeat_interval_ms : 30000)) {
         m_lastHeartbeatMs = now;
+        WatchdogManager::feed();
         sendHeartbeat(ESP.getFreeHeap(), ESP.getFreePsram(), m_flashEnabled);
+        WatchdogManager::feed();
+        return;
     }
 
-    // Command poll every 5s
-    if (now - m_lastCommandPollMs >= 5000) {
+    // Command poll every 6s
+    if (now - m_lastCommandPollMs >= 6000) {
         m_lastCommandPollMs = now;
+        WatchdogManager::feed();
         pollCommands();
+        WatchdogManager::feed();
     }
 }
 
