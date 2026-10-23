@@ -120,13 +120,6 @@ export const App: React.FC = () => {
     motion_ratio: 0.0,
   });
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setLiveViewerTick(Date.now());
-    }, 950);
-    return () => clearInterval(timer);
-  }, []);
-
   const [schedule, setSchedule] = useState<ScheduleConfig>({
     deviceId: selectedDevice.id,
     enabled: true,
@@ -861,8 +854,11 @@ export const App: React.FC = () => {
                               />
                             ) : usePythonLiveViewer ? (
                               <img
-                                src={`/api/ingestion/live-viewer/stream.jpg?t=${liveViewerTick}`}
-                                alt="ESP32-CAM Python live_viewer.py HUD Stream"
+                                src="/api/ingestion/live-viewer/mjpeg"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).src = `/api/ingestion/live-viewer/stream.jpg?t=${Date.now()}`;
+                                }}
+                                alt="ESP32-CAM Python live_viewer.py MJPEG Stream"
                                 className="w-full h-full object-cover"
                               />
                             ) : latestImage ? (

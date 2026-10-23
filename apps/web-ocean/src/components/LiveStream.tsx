@@ -32,32 +32,17 @@ export const LiveStream: React.FC<LiveStreamProps> = ({
   const [showDetections, setShowDetections] = useState(true);
   const [usePythonHud, setUsePythonHud] = useState(true);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [liveStreamUrl, setLiveStreamUrl] = useState<string>('/api/ingestion/live-viewer/stream.jpg');
-  const [streamTick, setStreamTick] = useState<number>(Date.now());
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setStreamTick(Date.now());
-    }, 900);
-    return () => clearInterval(timer);
-  }, []);
+  const [liveStreamUrl, setLiveStreamUrl] = useState<string>('/api/ingestion/live-viewer/mjpeg');
 
   useEffect(() => {
     if (usePythonHud) {
-      setLiveStreamUrl(`/api/ingestion/live-viewer/stream.jpg?t=${streamTick}`);
+      setLiveStreamUrl('/api/ingestion/live-viewer/mjpeg');
     } else if (latestImage && latestImage.id) {
-      // Load real binary JPEG stream from backend GridFS
       setLiveStreamUrl(`/api/images/${latestImage.id}/stream`);
     } else {
-      const url = createSvgDataUrl(
-        device.status === 'ONLINE' ? `${device.name} [ONLINE]` : 'CHƯA KẾT NỐI THIẾT BỊ THẬT',
-        false,
-        false,
-        'waiting',
-      );
-      setLiveStreamUrl(url);
+      setLiveStreamUrl('/api/ingestion/live-viewer/mjpeg');
     }
-  }, [device, latestImage, usePythonHud, streamTick]);
+  }, [device, latestImage, usePythonHud]);
 
   const handleCaptureClick = async () => {
     setIsCapturing(true);

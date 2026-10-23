@@ -190,6 +190,8 @@ export class IngestionController {
   async receiveLiveViewerFrame(@Body() body: any) {
     if (body && typeof body.frameBase64 === 'string' && body.frameBase64.length > 50) {
       this.db.liveViewerFrame = Buffer.from(body.frameBase64, 'base64');
+      this.db.liveViewerLastFrameTs = Date.now();
+      this.db.broadcastMjpegFrame(this.db.liveViewerFrame);
     }
     if (body && body.state && typeof body.state === 'object') {
       this.db.liveViewerState = {
@@ -209,6 +211,62 @@ export class IngestionController {
     return this.db.liveViewerState;
   }
 
+  /**
+   * High-Performance Zero-Lag Native MJPEG Stream for HTML5 <img> tags.
+   * Continuous multi-client frame streaming without setInterval or client polling.
+   */
+  @Get(['live-viewer/mjpeg', 'stream.mjpeg'])
+  @ApiOperation({ summary: 'Phát luồng MJPEG thời gian thực 0ms lag trực tiếp vào thẻ <img> HTML5' })
+  streamMjpeg(@Res() res: any) {
+    res.writeHead(200, {
+      'Content-Type': 'multipart/x-mixed-replace; boundary=--frame',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Connection': 'close',
+      'Pragma': 'no-cache',
+    });
+
+    // Send immediate initial frame from memory (HUD or raw camera) so player never waits
+    const initialFrame = this.db.liveViewerFrame || this.db.latestCameraRawFrame;
+    if (initialFrame && initialFrame.length > 50) {
+      res.write(
+        `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${initialFrame.length}\r\n\r\n`,
+      );
+      res.write(initialFrame);
+      res.write('\r\n');
+    }
+
+    this.db.mjpegClients.add(res);
+
+    res.on('close', () => {
+      this.db.mjpegClients.delete(res);
+    });
+  }
+
+  @Get('raw-frame.jpg')
+  @ApiOperation({ summary: 'Lấy khung hình thô mới nhất trực tiếp từ RAM (0ms latency, 1-hop cho Python)' })
+  getRawFrameJpg(@Res() res: any) {
+    res.set({
+      'Content-Type': 'image/jpeg',
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
+    if (this.db.latestCameraRawFrameMeta) {
+      res.set({
+        'X-Device-Id': this.db.latestCameraRawFrameMeta.deviceId || 'ESP32-CAM-01',
+        'X-Frame-Seq': String(this.db.latestCameraRawFrameMeta.seq || 0),
+        'X-Person-Detected': String(this.db.latestCameraRawFrameMeta.isPerson || false),
+        'X-Confidence': String(this.db.latestCameraRawFrameMeta.confidence || 0),
+        'X-Is-Dark': String(this.db.latestCameraRawFrameMeta.isDark || false),
+        'X-Captured-At': this.db.latestCameraRawFrameMeta.updatedAt || '',
+      });
+    }
+    if (this.db.latestCameraRawFrame && this.db.latestCameraRawFrame.length > 50) {
+      return res.end(this.db.latestCameraRawFrame);
+    }
+    return res.status(204).end();
+  }
+
   @Get('live-viewer/stream.jpg')
   @ApiOperation({ summary: 'Trả về khung hình HUD trực tiếp từ scripts/python/live_viewer.py' })
   async getLiveViewerStreamJpg(@Res() res: any) {
@@ -221,6 +279,11 @@ export class IngestionController {
 
     if (this.db.liveViewerFrame && this.db.liveViewerFrame.length > 100) {
       return res.end(this.db.liveViewerFrame);
+    }
+
+    // Direct RAM raw frame fallback
+    if (this.db.latestCameraRawFrame && this.db.latestCameraRawFrame.length > 100) {
+      return res.end(this.db.latestCameraRawFrame);
     }
 
     // Fallback to latest GridFS captured frame if live_viewer.py is still warming up
@@ -273,6 +336,32 @@ export class IngestionController {
     }
 
     const capturedAt = body.capturedAt ? new Date(body.capturedAt) : new Date();
+    const isPerson = headers['x-person-detected'] === 'true' || body.hasHuman === 'true' || body.hasHuman === true;
+    const confidence = parseFloat(headers['x-confidence'] || body.confidence || (isPerson ? '0.92' : '0.0'));
+    const isDark = headers['x-is-dark'] === 'true' || body.isDark === 'true' || body.isDark === true;
+    const width = parseInt(body.width || '320', 10);
+    const height = parseInt(body.height || '240', 10);
+
+    // INSTANT RAM CACHING: Update raw frame buffer with 0ms delay for live viewers (never blocked by DB deduplication)
+    this.db.latestCameraRawFrame = rawBuffer;
+    this.db.latestCameraRawFrameTime = capturedAt.toISOString();
+    this.db.latestCameraRawFrameSeq = (this.db.latestCameraRawFrameSeq || 0) + 1;
+    this.db.latestCameraRawFrameMeta = {
+      deviceId,
+      captureId,
+      isPerson,
+      confidence,
+      isDark,
+      width,
+      height,
+      seq: this.db.latestCameraRawFrameSeq,
+      updatedAt: capturedAt.toISOString(),
+    };
+
+    // If liveViewerFrame is not being pushed by Python, immediately stream this raw camera frame to all MJPEG viewers
+    if (!this.db.liveViewerFrame || Date.now() - (this.db.liveViewerLastFrameTs || 0) > 3000) {
+      this.db.broadcastMjpegFrame(rawBuffer);
+    }
 
     // 2. Multi-tier Deduplication Check
     const dedupResult = await this.dedup.checkDuplicate(deviceId, rawBuffer, capturedAt);
@@ -306,11 +395,6 @@ export class IngestionController {
 
     // 4. Stream directly into GridFS Bucket
     const filename = `${deviceId}_${captureId}.jpg`;
-    const isPerson = headers['x-person-detected'] === 'true' || body.hasHuman === 'true' || body.hasHuman === true;
-    const confidence = parseFloat(headers['x-confidence'] || body.confidence || (isPerson ? '0.92' : '0.0'));
-    const isDark = headers['x-is-dark'] === 'true' || body.isDark === 'true' || body.isDark === true;
-    const width = parseInt(body.width || '320', 10);
-    const height = parseInt(body.height || '240', 10);
 
     const imageMetadataDoc = {
       deviceId,

@@ -507,7 +507,7 @@ void RuntimeSupervisor::handleRunning() {
     } else {
         // Upload frame to Ocean Vision backend if human detected or every 6s
         static uint32_t lastUploadTime = 0;
-        if (lastUploadTime == 0 || (hasHuman && now - lastUploadTime >= 2000) || (now - lastUploadTime >= 6000)) {
+        if (lastUploadTime == 0 || (hasHuman && now - lastUploadTime >= 800) || (now - lastUploadTime >= 1200)) {
             WatchdogManager::feed();
             if (fb->format == PIXFORMAT_JPEG) {
                 m_netClient.uploadFrame(fb->buf, fb->len, fb->width, fb->height, hasHuman, humanResult.confidence, metrics.isBlackScreen);

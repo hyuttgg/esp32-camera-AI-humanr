@@ -189,6 +189,30 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   public latestTelemetry: any = null;
   public liveViewerFrame: Buffer | null = null;
+  public liveViewerLastFrameTs: number = 0;
+  public latestCameraRawFrame: Buffer | null = null;
+  public latestCameraRawFrameSeq: number = 0;
+  public latestCameraRawFrameTime: string = new Date().toISOString();
+  public latestCameraRawFrameMeta: any = null;
+  public mjpegClients: Set<any> = new Set();
+
+  public broadcastMjpegFrame(frameBuffer: Buffer) {
+    if (!frameBuffer || frameBuffer.length < 50 || this.mjpegClients.size === 0) return;
+    const boundary = Buffer.from(
+      `--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frameBuffer.length}\r\n\r\n`,
+    );
+    const trailing = Buffer.from('\r\n');
+    for (const client of Array.from(this.mjpegClients)) {
+      try {
+        client.write(boundary);
+        client.write(frameBuffer);
+        client.write(trailing);
+      } catch {
+        this.mjpegClients.delete(client);
+      }
+    }
+  }
+
   public liveViewerState: any = {
     running: true,
     script: 'scripts/python/live_viewer.py',
