@@ -49,25 +49,41 @@ services:
         value: "true"
       - key: AI_MODEL_PATH
         value: ./yolov8n.onnx
-      - key: MONGODB_URI
-        sync: false
+      - key: MONGODB_DATABASE
+        value: ocean_vision
+      - key: SIGNED_URL_TTL_SECONDS
+        value: 60
+      - key: DEVICE_PROVISIONING_SHARED_KEY
+        value: dev_shared_provisioning_key_replace_in_prod
+      - key: MYSQL_HOST
+        value: localhost
+      - key: MYSQL_PORT
+        value: 3306
+      - key: MYSQL_DATABASE
+        value: ocean_vision
+      - key: MYSQL_USER
+        value: ocean_user
+      - key: MYSQL_PASSWORD
+        value: ocean_pass
       - key: GOOGLE_CLIENT_ID
-        sync: false
+        value: your_google_client_id.apps.googleusercontent.com
       - key: GOOGLE_CLIENT_SECRET
-        sync: false
+        value: your_google_client_secret
       - key: GMAIL_CLIENT_ID
-        sync: false
+        value: your_gmail_oauth_client_id.apps.googleusercontent.com
       - key: GMAIL_CLIENT_SECRET
-        sync: false
+        value: your_gmail_oauth_client_secret
       - key: GMAIL_REFRESH_TOKEN
-        sync: false
+        value: your_gmail_oauth_refresh_token
       - key: GMAIL_SENDER_EMAIL
-        sync: false
+        value: oceanvision.alerts@gmail.com
       - key: ADMIN_ALERT_EMAIL
-        sync: false
+        value: admin@oceanvision.io
       - key: SERVER_WIFI_SSID
-        sync: false
+        value: OceanVision_Host
       - key: SERVER_WIFI_PASSWORD
-        sync: false
+        value: ocean_secure_pass
       - key: SERVER_HOST_IP
+        value: esp32-camera-ai-humanr.onrender.com
+      - key: MONGODB_URI
         sync: false
