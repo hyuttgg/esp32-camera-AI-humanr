@@ -1,0 +1,9 @@
+{
+    "runql.ai.source": "githubCopilot",
+    "runql.ai.extension": "",
+    "runql.ai.apiProvider": "",
+    "runql.ai.model": "gpt-4.1",
+    "runql.ai.apiBaseUrl": "",
+    "runql.ai.sendSchemaContext": true,
+    "runql.ai.maxSchemaChars": 150000
+}

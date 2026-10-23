@@ -1,0 +1,73 @@
+services:
+  - type: web
+    name: esp32-camera-ai-humanr
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 7860
+      - key: APP_TIMEZONE
+        value: Asia/Ho_Chi_Minh
+      - key: MONGODB_GRIDFS_BUCKET
+        value: cameraImages
+      - key: RETENTION_MODE
+        value: AFTER_CAPTURE
+      - key: RETENTION_HOURS
+        value: 15
+      - key: DAILY_CUTOFF_TIME
+        value: "15:00"
+      - key: RETENTION_WORKER_INTERVAL_SECONDS
+        value: 300
+      - key: DEDUP_EXACT_ENABLED
+        value: "true"
+      - key: DEDUP_PERCEPTUAL_ENABLED
+        value: "true"
+      - key: DEDUP_PHASH_HAMMING_THRESHOLD
+        value: 8
+      - key: DEDUP_WINDOW_SECONDS
+        value: 900
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRATION
+        value: 3600s
+      - key: REFRESH_TOKEN_SECRET
+        generateValue: true
+      - key: REFRESH_TOKEN_EXPIRATION
+        value: 604800s
+      - key: UPLOAD_MAX_BYTES
+        value: 2097152
+      - key: DEVICE_HEARTBEAT_STALE_SECONDS
+        value: 90
+      - key: DEVICE_HMAC_WINDOW_SECONDS
+        value: 120
+      - key: PYTHON_WORKER_PORT
+        value: 5000
+      - key: AI_DETECTION_ENABLED
+        value: "true"
+      - key: AI_MODEL_PATH
+        value: ./yolov8n.onnx
+      - key: MONGODB_URI
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_CLIENT_ID
+        sync: false
+      - key: GMAIL_CLIENT_SECRET
+        sync: false
+      - key: GMAIL_REFRESH_TOKEN
+        sync: false
+      - key: GMAIL_SENDER_EMAIL
+        sync: false
+      - key: ADMIN_ALERT_EMAIL
+        sync: false
+      - key: SERVER_WIFI_SSID
+        sync: false
+      - key: SERVER_WIFI_PASSWORD
+        sync: false
+      - key: SERVER_HOST_IP
+        sync: false

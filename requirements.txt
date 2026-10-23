@@ -1,0 +1,5 @@
+pyserial>=3.5
+opencv-python>=4.8.0
+numpy>=1.23.0
+onnxruntime>=1.15.0
+esptool>=4.6.0
