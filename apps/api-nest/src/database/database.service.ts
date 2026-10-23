@@ -29,10 +29,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   public mockGridFsFiles: Map<string, { buffer: Buffer; contentType: string }> = new Map();
   public mockAuditLogs: Array<any> = [];
 
-  async OnModuleInit() {
-    await this.initAllDatabases();
-  }
-
   async onModuleInit() {
     await this.initAllDatabases();
   }
@@ -61,6 +57,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         waitForConnections: true,
         connectionLimit: 10,
         queueLimit: 0,
+        connectTimeout: 3000,
       });
 
       // Quick ping test
@@ -73,6 +70,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     } catch (err: any) {
       this.logger.warn(`MySQL connection unavailable (${err.message}). Activating In-Memory Fallback Adapter for local development.`);
       this.isMysqlConnected = false;
+      if (this.mysqlPool) {
+        await this.mysqlPool.end().catch(() => {});
+        this.mysqlPool = null;
+      }
     }
 
     // 2. Initialize MongoDB Atlas & GridFS
@@ -98,19 +99,32 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       this.isMongoConnected = false;
     }
 
-    // 3. Initialize Redis Client
-    try {
-      const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
-      this.redisClient = new Redis(redisUrl, {
-        lazyConnect: true,
-        maxRetriesPerRequest: 1,
-        connectTimeout: 2000,
-      });
-      await this.redisClient.connect();
-      this.isRedisConnected = true;
-      this.logger.log('Redis client connected successfully.');
-    } catch (err: any) {
-      this.logger.warn(`Redis unavailable (${err.message}). Using local In-Memory Distributed Lock & Counter fallback.`);
+    // 3. Initialize Redis Client (with silent fallback & zero retry spam when Redis is not provisioned)
+    const redisUrl = process.env.REDIS_URL;
+    if (redisUrl && !redisUrl.includes('localhost') && !redisUrl.includes('127.0.0.1')) {
+      try {
+        this.redisClient = new Redis(redisUrl, {
+          lazyConnect: true,
+          maxRetriesPerRequest: 1,
+          connectTimeout: 2000,
+          retryStrategy: () => null, // Stop endless reconnect loop if Redis is offline
+        });
+        this.redisClient.on('error', () => {
+          // Prevent '[ioredis] Unhandled error event' spam in cloud logs
+        });
+        await this.redisClient.connect();
+        this.isRedisConnected = true;
+        this.logger.log('Redis client connected successfully.');
+      } catch (err: any) {
+        this.logger.warn(`Redis unavailable (${err.message}). Using local In-Memory Distributed Lock & Counter fallback.`);
+        this.isRedisConnected = false;
+        if (this.redisClient) {
+          this.redisClient.disconnect();
+          this.redisClient = null;
+        }
+      }
+    } else {
+      this.logger.log('External REDIS_URL not configured. Using local In-Memory Distributed Lock & Counter fallback.');
       this.isRedisConnected = false;
     }
 
