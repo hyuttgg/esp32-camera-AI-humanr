@@ -19,7 +19,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     NotificationsModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, RolesGuard, HmacVerificationGuard, DatabaseService],
+  providers: [AuthService, JwtStrategy, RolesGuard, HmacVerificationGuard],
   exports: [AuthService, JwtStrategy, RolesGuard, HmacVerificationGuard],
 })
 export class AuthModule {}
