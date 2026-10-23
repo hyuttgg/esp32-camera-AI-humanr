@@ -94,7 +94,7 @@ void RuntimeSupervisor::setup() {
     digitalWrite(PIN_STATUS_LED, HIGH); // Red LED OFF
     delay(150);
 
-    DiagnosticLogger::init(LOG_LEVEL_INFO, 1000000);
+    DiagnosticLogger::init(LOG_LEVEL_INFO, 115200);
 
     DiagnosticLogger::i(TAG, "==========================================================");
     DiagnosticLogger::i(TAG, "   %s v%s (%s)", FIRMWARE_NAME, FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
@@ -106,9 +106,9 @@ void RuntimeSupervisor::setup() {
 
     // Initialize Network Client with NVS persistence and Power-Recovery loop
     NetworkConfig netCfg;
-    netCfg.wifi_ssid = "OceanVision_Host";
+    netCfg.wifi_ssid = "khanh2007";
     netCfg.wifi_password = "ocean_secure_pass";
-    netCfg.backend_url = "http://192.168.1.5:3000";
+    netCfg.backend_url = "https://esp32-camera-ai-humanr.onrender.com";
     netCfg.device_id = "ESP32-CAM-01";
     netCfg.hmac_secret = "dev_secret_key_change_in_production";
     netCfg.heartbeat_interval_ms = 30000;
@@ -248,12 +248,36 @@ void RuntimeSupervisor::handleAiInit() {
 
 void RuntimeSupervisor::processSerialCommands() {
     while (Serial.available() > 0) {
+        int pk = Serial.peek();
+        if (pk == 13 || pk == 10 || pk == 32) {
+            Serial.read();
+            continue;
+        }
+        if (pk == 'S' || pk == 'P' || pk == 'F') {
+            String line = Serial.readStringUntil((char)10);
+            line.trim();
+            if (line.startsWith("SET_WIFI:") || line.startsWith("PROV:") ||
+                line.startsWith("SET_EI_CONFIG:") || line.startsWith("FLASH_VERIFY")) {
+                m_netClient.handleSerialLine(line);
+                continue;
+            }
+            if (line.length() == 0) continue;
+            char c0 = line.charAt(0);
+            if (c0 == 'S') {
+                m_streamBinaryFrames = true;
+            } else if (c0 == 'F') {
+                static bool flashState = false;
+                flashState = !flashState;
+                m_cameraMgr.setFlashLed(flashState ? 45 : 0);
+            }
+            continue;
+        }
         char c = (char)Serial.read();
-        if (c == 'V' || c == 'v' || c == 'S' || c == 's') { // Stream Video
+        if (c == 'V' || c == 'v' || c == 's') { // Stream Video
             m_streamBinaryFrames = true;
         } else if (c == 'X' || c == 'x' || c == 'Q' || c == 'q') { // Stop Video
             m_streamBinaryFrames = false;
-        } else if (c == 'F' || c == 'f') { // Toggle Flash LED
+        } else if (c == 'f') { // Toggle Flash LED
             static bool flashState = false;
             flashState = !flashState;
             m_cameraMgr.setFlashLed(flashState ? 45 : 0);

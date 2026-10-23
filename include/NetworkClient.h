@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
 
@@ -60,6 +61,7 @@ public:
     void saveCredentialsToNVS(const String& ssid, const String& password, const String& backendUrl);
     bool loadCredentialsFromNVS();
     void checkSerialProvisioning();
+    void handleSerialLine(const String& rawLine);
     void handlePowerRecovery();
 
     // Commands

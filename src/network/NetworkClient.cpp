@@ -7,6 +7,14 @@
 
 #define FLASH_GPIO_PIN 4
 
+static bool beginHttpRequest(HTTPClient& http, WiFiClient& plainClient, WiFiClientSecure& secureClient, const String& url) {
+    if (url.startsWith("https://")) {
+        secureClient.setInsecure();
+        return http.begin(secureClient, url);
+    }
+    return http.begin(plainClient, url);
+}
+
 HardwareTelemetry NetworkClient::collectHardwareTelemetry() {
     HardwareTelemetry t;
     
@@ -46,9 +54,11 @@ bool NetworkClient::sendHardwareTelemetry() {
 
     HardwareTelemetry t = collectHardwareTelemetry();
 
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
     HTTPClient http;
     String url = String(m_config.backend_url) + "/api/ingestion/telemetry";
-    http.begin(url);
+    if (!beginHttpRequest(http, plainClient, secureClient, url)) return false;
     http.addHeader("Content-Type", "application/json");
 
     String json = "{";
@@ -146,43 +156,49 @@ void NetworkClient::saveCredentialsToNVS(const String& ssid, const String& passw
     }
 }
 
-void NetworkClient::checkSerialProvisioning() {
-    if (Serial.available()) {
-        String line = Serial.readStringUntil('\n');
-        line.trim();
+void NetworkClient::handleSerialLine(const String& rawLine) {
+    String line = rawLine;
+    line.trim();
+    if (line.length() == 0) return;
 
-        // Protocol: SET_WIFI:ssid,password,backend_url
-        if (line.startsWith("SET_WIFI:") || line.startsWith("PROV:")) {
-            int prefixLen = line.indexOf(':') + 1;
-            String params = line.substring(prefixLen);
-            int comma1 = params.indexOf(',');
-            if (comma1 > 0) {
-                String newSsid = params.substring(0, comma1);
-                String rest = params.substring(comma1 + 1);
-                int comma2 = rest.indexOf(',');
-                String newPass = "";
-                String newBackend = "";
-                if (comma2 > 0) {
-                    newPass = rest.substring(0, comma2);
-                    newBackend = rest.substring(comma2 + 1);
-                } else {
-                    newPass = rest;
-                }
+    // Protocol: SET_WIFI:ssid,password,backend_url
+    if (line.startsWith("SET_WIFI:") || line.startsWith("PROV:")) {
+        int prefixLen = line.indexOf(':') + 1;
+        String params = line.substring(prefixLen);
+        int comma1 = params.indexOf(',');
+        if (comma1 > 0) {
+            String newSsid = params.substring(0, comma1);
+            String rest = params.substring(comma1 + 1);
+            int comma2 = rest.indexOf(',');
+            String newPass = "";
+            String newBackend = "";
+            if (comma2 > 0) {
+                newPass = rest.substring(0, comma2);
+                newBackend = rest.substring(comma2 + 1);
+            } else {
+                newPass = rest;
+            }
 
-                saveCredentialsToNVS(newSsid, newPass, newBackend);
-                Serial.printf("[WEB-FLASHER-ACK] SUCCESS: Wi-Fi updated to '%s'. Connecting...\n", newSsid.c_str());
-            }
-        } else if (line.startsWith("SET_EI_CONFIG:")) {
-            String cfg = line.substring(14);
-            if (m_prefs.begin("ocean_wifi", false)) {
-                m_prefs.putString("ei_cfg", cfg);
-                m_prefs.end();
-            }
-            Serial.printf("[EI-FIRMWARE-ACK] Edge Impulse DSP (320x240->96x96 RGB888 + BGR2RGB #379 + TurboQuant INT4) flashed: %s\n", cfg.c_str());
-        } else if (line.startsWith("FLASH_VERIFY")) {
-            Serial.printf("[BOARD-READY] AI-Thinker ESP32-CAM | PSRAM: %u bytes | Flash: %u bytes | SSID: %s | IP: %s\n",
-                          ESP.getFreePsram(), ESP.getFlashChipSize(), m_config.wifi_ssid, getIpAddress().c_str());
+            saveCredentialsToNVS(newSsid, newPass, newBackend);
+            Serial.printf("[WEB-FLASHER-ACK] SUCCESS: Wi-Fi updated to '%s'. Connecting...\n", newSsid.c_str());
         }
+    } else if (line.startsWith("SET_EI_CONFIG:")) {
+        String cfg = line.substring(14);
+        if (m_prefs.begin("ocean_wifi", false)) {
+            m_prefs.putString("ei_cfg", cfg);
+            m_prefs.end();
+        }
+        Serial.printf("[EI-FIRMWARE-ACK] Edge Impulse DSP (320x240->96x96 RGB888 + BGR2RGB #379 + TurboQuant INT4) flashed: %s\n", cfg.c_str());
+    } else if (line.startsWith("FLASH_VERIFY")) {
+        Serial.printf("[BOARD-READY] AI-Thinker ESP32-CAM | PSRAM: %u bytes | Flash: %u bytes | SSID: %s | IP: %s\n",
+                      ESP.getFreePsram(), ESP.getFlashChipSize(), m_config.wifi_ssid, getIpAddress().c_str());
+    }
+}
+
+void NetworkClient::checkSerialProvisioning() {
+    while (Serial.available()) {
+        String line = Serial.readStringUntil('\n');
+        handleSerialLine(line);
     }
 }
 
@@ -309,9 +325,11 @@ String NetworkClient::computeHmacSha256(const String& payload) {
 bool NetworkClient::sendHeartbeat(uint32_t freeHeap, uint32_t freePsram, bool flashEnabled) {
     if (!isConnected()) return false;
 
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
     HTTPClient http;
     String url = String(m_config.backend_url) + "/api/ingestion/heartbeat";
-    http.begin(url);
+    if (!beginHttpRequest(http, plainClient, secureClient, url)) return false;
     http.addHeader("Content-Type", "application/json");
 
     String json = "{";
@@ -334,9 +352,11 @@ bool NetworkClient::uploadFrame(const uint8_t* jpegBuf, size_t jpegLen, uint16_t
                                 bool personDetected, float confidence, bool isDark) {
     if (!isConnected() || !jpegBuf || jpegLen == 0) return false;
 
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
     HTTPClient http;
     String url = String(m_config.backend_url) + "/api/ingestion/upload";
-    http.begin(url);
+    if (!beginHttpRequest(http, plainClient, secureClient, url)) return false;
 
     String timestamp = String(millis());
     String nonce = generateNonce();
@@ -360,9 +380,11 @@ bool NetworkClient::uploadFrame(const uint8_t* jpegBuf, size_t jpegLen, uint16_t
 void NetworkClient::pollCommands() {
     if (!isConnected()) return;
 
+    WiFiClient plainClient;
+    WiFiClientSecure secureClient;
     HTTPClient http;
     String url = String(m_config.backend_url) + "/api/devices/" + String(m_config.device_id) + "/commands/next";
-    http.begin(url);
+    if (!beginHttpRequest(http, plainClient, secureClient, url)) return;
     int code = http.GET();
 
     if (code == 200) {

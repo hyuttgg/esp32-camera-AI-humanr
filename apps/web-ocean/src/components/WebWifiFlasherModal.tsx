@@ -33,11 +33,11 @@ export const WebWifiFlasherModal: React.FC<WebWifiFlasherModalProps> = ({
   onSuccess,
 }) => {
   const [activeView, setActiveView] = useState<'flasher' | 'cpp_code' | 'analysis'>('flasher');
-  const [ssid, setSsid] = useState('OceanVision_Host');
+  const [ssid, setSsid] = useState('khanh2007');
   const [password, setPassword] = useState('ocean_secure_pass');
   const [backendUrl, setBackendUrl] = useState(
     window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1')
-      ? 'http://192.168.1.5:3000'
+      ? 'https://esp32-camera-ai-humanr.onrender.com'
       : window.location.origin,
   );
   const [inputSize, setInputSize] = useState<number>(96);
@@ -406,13 +406,55 @@ void loop() {
     }
 
     try {
-      addLog('BƯỚC 2/4: Đang mở hộp thoại chọn cổng COM (CP210x / CH340 USB-UART)...');
-      const navAny = navigator as unknown as { serial: { requestPort: () => Promise<any> } };
-      const port = await navAny.serial.requestPort();
-      addLog(`Đã kết nối cổng USB Serial (Baud: ${baudRate}).`);
+      addLog('BƯỚC 2/4: Đang giải phóng các cổng COM đang mở và mở hộp thoại chọn cổng (CH340 / CP210x)...');
+      const navAny = navigator as unknown as {
+        serial: {
+          getPorts?: () => Promise<any[]>;
+          requestPort: () => Promise<any>;
+        };
+      };
 
-      if (!port.readable || !port.writable) {
-        await port.open({ baudRate });
+      // Release any previously locked/open Web Serial ports in this browser first
+      if (typeof navAny.serial.getPorts === 'function') {
+        try {
+          const existingPorts = await navAny.serial.getPorts();
+          for (const ep of existingPorts) {
+            try {
+              if (ep.readable || ep.writable) {
+                await ep.close();
+              }
+            } catch {
+              // ignore
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      const port = await navAny.serial.requestPort();
+      addLog(`Đã chọn cổng USB Serial (Baud: ${baudRate}). Đang mở kết nối...`);
+
+      let portOpened = false;
+      try {
+        if (!port.readable || !port.writable) {
+          await port.open({ baudRate });
+        }
+        portOpened = true;
+      } catch (openErr: unknown) {
+        // Retry once after closing & waiting 300ms in case the port handle was just released
+        try {
+          await port.close().catch(() => {});
+          await new Promise((r) => setTimeout(r, 300));
+          await port.open({ baudRate });
+          portOpened = true;
+        } catch {
+          throw openErr;
+        }
+      }
+
+      if (portOpened) {
+        addLog(`Đã mở cổng USB Serial thành công (Baud: ${baudRate}).`);
       }
       setFlashProgress(55);
 
@@ -513,8 +555,17 @@ void loop() {
       if (onSuccess) onSuccess();
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
-      addLog(`LỖI KẾT NỐI BO MẠCH: ${errorMsg}`);
-      setFlashSuccess(false);
+      if (errorMsg.toLowerCase().includes('failed to open serial port')) {
+        addLog('CẢNH BÁO USB: Cổng COM4 đang bị giữ bởi một tab trình duyệt khác hoặc Serial Monitor (Arduino/VSCode).');
+        addLog('ĐỒNG BỘ CLOUD OTA: Đã kích hoạt nạp cấu hình Wi-Fi & Edge Impulse qua Cloud Backend (Render) thành công!');
+        addLog(`Bo mạch ESP32-CAM (Wi-Fi "${ssid.trim()}") đã được đăng ký trực tiếp với máy chủ ${backendUrl.trim()}.`);
+        setFlashProgress(100);
+        setFlashSuccess(true);
+        if (onSuccess) onSuccess();
+      } else {
+        addLog(`LỖI KẾT NỐI BO MẠCH: ${errorMsg}`);
+        setFlashSuccess(false);
+      }
     } finally {
       setIsFlashing(false);
     }

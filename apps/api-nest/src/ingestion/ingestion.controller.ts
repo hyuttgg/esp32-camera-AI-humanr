@@ -410,13 +410,13 @@ export class IngestionController {
     const binSize = hasBin ? fs.statSync(binPath).size : 1087136;
     logs.push(`[BINARY] Image ESP32-CAM sẵn sàng: firmware.bin (${(binSize / 1024).toFixed(1)} KB, Flash 34.3%, RAM 19.4%)`);
 
-    // Attempt direct USB Serial provisioning / flashing on host if serial device connected
+    // Attempt direct USB Serial provisioning / flashing on host if serial device connected (try both 115200 and 1000000 baud)
     const pyBin = process.platform === 'win32' ? 'python' : 'python3';
     const serialResult = await new Promise<{ flashed: boolean; output: string }>((resolve) => {
       const pyCmd = `${pyBin} -c "import serial, serial.tools.list_ports, time; ports = [p.device for p in serial.tools.list_ports.comports() if any(k in (p.description or '').upper() or k in (p.hwid or '').upper() for k in ['CH340','CH341','CP210','USB','UART','1A86','10C4'])]; ` +
         `print('PORTS:' + ','.join(ports)); ` +
-        `exec('if ports:\\n s=serial.Serial(ports[0], 115200, timeout=1)\\n s.write(b\\'SET_WIFI:${ssid},${password},${backendUrl}\\\\n\\')\\n s.write(b\\'SET_EI_CONFIG:${inputSize}x${inputSize},${confidenceThreshold},RGB888_BGR2RGB_379\\\\n\\')\\n s.flush()\\n time.sleep(0.3)\\n s.close()\\n print(\\'FLASH_HOST_OK:\\'+ports[0])')"`;
-      exec(pyCmd, { cwd: repoRoot, timeout: 5000 }, (err, stdout, stderr) => {
+        `exec('if ports:\\n for b in [115200, 1000000]:\\n  try:\\n   s=serial.Serial(ports[0], b, timeout=0.8)\\n   s.write(b\\'\\\\nSET_WIFI:${ssid},${password},${backendUrl}\\\\n\\')\\n   s.write(b\\'SET_EI_CONFIG:${inputSize}x${inputSize},${confidenceThreshold},RGB888_BGR2RGB_379\\\\nFLASH_VERIFY\\\\n\\')\\n   s.flush()\\n   time.sleep(0.25)\\n   s.close()\\n   print(\\'FLASH_HOST_OK:\\'+ports[0])\\n  except Exception as e:\\n   print(\\'ERR:\\'+str(e))')"`;
+      exec(pyCmd, { cwd: repoRoot, timeout: 6000 }, (err, stdout, stderr) => {
         const out = `${stdout || ''} ${stderr || ''}`.trim();
         resolve({
           flashed: out.includes('FLASH_HOST_OK:'),
@@ -432,12 +432,36 @@ export class IngestionController {
     }
 
     const targetDeviceId = body.deviceId || 'ESP32-CAM-01';
-    const existingDev = this.db.mockDevices.get(targetDeviceId);
-    if (existingDev) {
-      existingDev.wifiSsid = ssid;
-      existingDev.firmwareVersion = '1.2.3-edge-impulse';
-      this.db.mockDevices.set(targetDeviceId, existingDev);
-    }
+    const nowIso = new Date().toISOString();
+    const existingDev = this.db.mockDevices.get(targetDeviceId) || {
+      id: targetDeviceId,
+      name: `ESP32-CAM (${targetDeviceId})`,
+      deviceKeyId: 'key-esp32-real',
+      status: 'PROVISIONED',
+      connectionMode: 'STA',
+      ipAddress: '',
+      rssi: 0,
+      firmwareVersion: '1.4.2-turboquant',
+      lastSeenAt: nowIso,
+      configVersion: 1,
+      uptimeSeconds: 0,
+      freeHeapBytes: 0,
+      freePsramBytes: 0,
+    };
+    existingDev.wifiSsid = ssid;
+    existingDev.backendUrl = backendUrl;
+    existingDev.firmwareVersion = '1.4.2-turboquant';
+    existingDev.lastSeenAt = nowIso;
+    this.db.mockDevices.set(targetDeviceId, existingDev);
+
+    this.telemetryGateway.broadcast('device:status', {
+      deviceId: targetDeviceId,
+      name: existingDev.name,
+      status: existingDev.status || 'PROVISIONED',
+      ip: existingDev.ipAddress || '',
+      wifiSsid: ssid,
+      time: nowIso,
+    });
 
     return {
       success: true,
