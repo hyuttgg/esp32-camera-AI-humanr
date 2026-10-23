@@ -29,11 +29,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Python Vision Worker & install dependencies
+# Copy Python Vision Worker & compiled ESP32-CAM firmware binaries
 COPY apps/vision-worker ./apps/vision-worker
 COPY human_detector.py ./human_detector.py
 COPY include ./include
 COPY src ./src
+COPY firmware ./firmware
 RUN pip3 install --no-cache-dir --break-system-packages -r apps/vision-worker/requirements.txt pyserial
 
 # Copy built Frontend and Backend

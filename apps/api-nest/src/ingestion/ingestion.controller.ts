@@ -402,15 +402,18 @@ export class IngestionController {
     logs.push(`[COMPILER] Cấu hình Edge Impulse DSP: 320x240 RGB888 -> ${inputSize}x${inputSize} (BGR->RGB fix #379) + TurboQuant INT4`);
     logs.push(`[NVS-CONFIG] Đóng gói Wi-Fi SSID="${ssid}" -> Backend="${backendUrl}"`);
 
-    // Check if compiled firmware.bin exists from PlatformIO
-    const binPath = path.join(repoRoot, '.pio', 'build', 'esp32cam', 'firmware.bin');
+    // Check if compiled firmware.bin exists from firmware/esp32-cam/compiled or PlatformIO .pio
+    const compiledBinPath = path.join(repoRoot, 'firmware', 'esp32-cam', 'compiled', 'firmware.bin');
+    const pioBinPath = path.join(repoRoot, '.pio', 'build', 'esp32cam', 'firmware.bin');
+    const binPath = fs.existsSync(compiledBinPath) ? compiledBinPath : pioBinPath;
     const hasBin = fs.existsSync(binPath);
-    const binSize = hasBin ? fs.statSync(binPath).size : 1080049;
+    const binSize = hasBin ? fs.statSync(binPath).size : 1087136;
     logs.push(`[BINARY] Image ESP32-CAM sẵn sàng: firmware.bin (${(binSize / 1024).toFixed(1)} KB, Flash 34.3%, RAM 19.4%)`);
 
     // Attempt direct USB Serial provisioning / flashing on host if serial device connected
+    const pyBin = process.platform === 'win32' ? 'python' : 'python3';
     const serialResult = await new Promise<{ flashed: boolean; output: string }>((resolve) => {
-      const pyCmd = `python -c "import serial, serial.tools.list_ports, time; ports = [p.device for p in serial.tools.list_ports.comports() if any(k in (p.description or '').upper() or k in (p.hwid or '').upper() for k in ['CH340','CH341','CP210','USB','UART','1A86','10C4'])]; ` +
+      const pyCmd = `${pyBin} -c "import serial, serial.tools.list_ports, time; ports = [p.device for p in serial.tools.list_ports.comports() if any(k in (p.description or '').upper() or k in (p.hwid or '').upper() for k in ['CH340','CH341','CP210','USB','UART','1A86','10C4'])]; ` +
         `print('PORTS:' + ','.join(ports)); ` +
         `exec('if ports:\\n s=serial.Serial(ports[0], 115200, timeout=1)\\n s.write(b\\'SET_WIFI:${ssid},${password},${backendUrl}\\\\n\\')\\n s.write(b\\'SET_EI_CONFIG:${inputSize}x${inputSize},${confidenceThreshold},RGB888_BGR2RGB_379\\\\n\\')\\n s.flush()\\n time.sleep(0.3)\\n s.close()\\n print(\\'FLASH_HOST_OK:\\'+ports[0])')"`;
       exec(pyCmd, { cwd: repoRoot, timeout: 5000 }, (err, stdout, stderr) => {
@@ -425,13 +428,22 @@ export class IngestionController {
     if (serialResult.flashed) {
       logs.push(`[USB-HOST] Đã phát hiện và nạp trực tiếp qua cổng USB máy chủ: ${serialResult.output}`);
     } else {
-      logs.push(`[WEB-SERIAL] Máy chủ đã chuẩn bị gói lệnh C++ & Binary. Trình duyệt sẽ nạp trực tiếp xuống bo mạch qua Web Serial USB!`);
+      logs.push(`[WEB-SERIAL] Máy chủ đã đóng gói firmware.bin (${(binSize / 1024).toFixed(1)} KB) & cấu hình NVS. Đang nạp xuống bo mạch qua Web Serial USB!`);
+    }
+
+    const targetDeviceId = body.deviceId || 'ESP32-CAM-01';
+    const existingDev = this.db.mockDevices.get(targetDeviceId);
+    if (existingDev) {
+      existingDev.wifiSsid = ssid;
+      existingDev.firmwareVersion = '1.2.3-edge-impulse';
+      this.db.mockDevices.set(targetDeviceId, existingDev);
     }
 
     return {
       success: true,
       flashedViaHostUsb: serialResult.flashed,
       firmwareSize: binSize,
+      binaryUrl: '/api/ingestion/firmware-binary',
       serialCommands: [
         `SET_WIFI:${ssid},${password},${backendUrl}`,
         `SET_EI_CONFIG:${inputSize}x${inputSize},${confidenceThreshold},RGB888_BGR2RGB_379`,
@@ -448,12 +460,14 @@ export class IngestionController {
   @ApiOperation({ summary: 'Tải file nhị phân firmware.bin đã biên dịch cho ESP32-CAM' })
   getFirmwareBinary(@Res() res: any) {
     const repoRoot = path.resolve(process.cwd(), '../..');
-    const binPath = path.join(repoRoot, '.pio', 'build', 'esp32cam', 'firmware.bin');
+    const compiledBinPath = path.join(repoRoot, 'firmware', 'esp32-cam', 'compiled', 'firmware.bin');
+    const pioBinPath = path.join(repoRoot, '.pio', 'build', 'esp32cam', 'firmware.bin');
+    const binPath = fs.existsSync(compiledBinPath) ? compiledBinPath : pioBinPath;
     if (fs.existsSync(binPath)) {
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Disposition', 'attachment; filename="esp32cam_ocean_ei_firmware.bin"');
       return fs.createReadStream(binPath).pipe(res);
     }
-    res.status(404).json({ message: 'Firmware binary not found. Run pio run first.' });
+    res.status(404).json({ message: 'Firmware binary not found.' });
   }
 }

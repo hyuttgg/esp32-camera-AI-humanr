@@ -36,3 +36,4 @@ dataset/
 logs/
 runs/
 firmware_bin/
+oceanvision_esp32cam_prompts/

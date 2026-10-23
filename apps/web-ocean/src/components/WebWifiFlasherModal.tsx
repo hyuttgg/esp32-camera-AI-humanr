@@ -411,7 +411,9 @@ void loop() {
       const port = await navAny.serial.requestPort();
       addLog(`Đã kết nối cổng USB Serial (Baud: ${baudRate}).`);
 
-      await port.open({ baudRate });
+      if (!port.readable || !port.writable) {
+        await port.open({ baudRate });
+      }
       setFlashProgress(55);
 
       // Pulse DTR/RTS to wake/reset ESP32-CAM cleanly before injecting C++ commands
@@ -420,8 +422,8 @@ void loop() {
           addLog('BƯỚC 3/4: Đang kích xung phần cứng DTR/RTS để đồng bộ Bootloader ESP32-CAM...');
           await port.setSignals({ dataTerminalReady: false, requestToSend: true });
           await new Promise((r) => setTimeout(r, 120));
-          await port.setSignals({ dataTerminalReady: true, requestToSend: false });
-          await new Promise((r) => setTimeout(r, 250));
+          await port.setSignals({ dataTerminalReady: false, requestToSend: false });
+          await new Promise((r) => setTimeout(r, 350));
         }
       } catch {
         // Ignore if driver doesn't expose DTR/RTS
@@ -431,64 +433,78 @@ void loop() {
       const encoder = new TextEncoder();
       const writer = port.writable.getWriter();
 
-      const cmdWifi = `SET_WIFI:${ssid.trim()},${password.trim()},${backendUrl.trim()}\n`;
+      const cmdWifi = `\nSET_WIFI:${ssid.trim()},${password.trim()},${backendUrl.trim()}\n`;
       const cmdEi = `SET_EI_CONFIG:${inputSize}x${inputSize},${confidenceThreshold.toFixed(2)},RGB888_BGR2RGB_379,OLED_${oledEnabled ? 1 : 0}\n`;
       const cmdVerify = `FLASH_VERIFY\n`;
 
       addLog(`Đang nạp lệnh C++ NVS: SET_WIFI:${ssid.trim()},******,${backendUrl.trim()}`);
       await writer.write(encoder.encode(cmdWifi));
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 200));
 
       addLog(
         `Đang nạp cấu hình C++ Edge Impulse DSP: ${inputSize}x${inputSize} RGB888 (BGR->RGB fix #379) + TurboQuant INT4`,
       );
       await writer.write(encoder.encode(cmdEi));
-      await new Promise((r) => setTimeout(r, 150));
+      await new Promise((r) => setTimeout(r, 200));
 
       await writer.write(encoder.encode(cmdVerify));
       writer.releaseLock();
       setFlashProgress(80);
 
-      // Step 4: Read hardware verification response from ESP32-CAM
+      // Step 4: Read hardware verification response from ESP32-CAM safely (cancel pending read before closing!)
       addLog('BƯỚC 4/4: Đang đọc phản hồi xác thực từ vi điều khiển ESP32-CAM...');
-      const decoder = new TextDecoder();
-      const reader = port.readable.getReader();
-      let accumulated = '';
-      const deadline = Date.now() + 6500;
+      if (port.readable) {
+        const decoder = new TextDecoder();
+        const reader = port.readable.getReader();
+        let accumulated = '';
+        let timedOut = false;
 
-      while (Date.now() < deadline) {
-        const readPromise = reader.read();
-        const timeoutPromise = new Promise<{ value?: Uint8Array; done: boolean }>((resolve) =>
-          setTimeout(() => resolve({ done: true }), 1500),
-        );
-        const { value, done } = await Promise.race([readPromise, timeoutPromise]);
-        if (done) break;
-        if (value) {
-          const text = decoder.decode(value);
-          accumulated += text;
-          text
-            .split('\n')
-            .map((l) => l.trim())
-            .filter(Boolean)
-            .forEach((line) => addLog(`ESP32-CAM > ${line}`));
+        const cancelTimer = setTimeout(() => {
+          timedOut = true;
+          reader.cancel().catch(() => {});
+        }, 3500);
 
-          if (
-            accumulated.includes('[WEB-FLASHER-ACK]') ||
-            accumulated.includes('[EI-FIRMWARE-ACK]') ||
-            accumulated.includes('[BOARD-READY]') ||
-            accumulated.includes('person (')
-          ) {
-            break;
+        try {
+          while (!timedOut) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) {
+              const text = decoder.decode(value, { stream: true });
+              accumulated += text;
+              text
+                .split('\n')
+                .map((l) => l.trim())
+                .filter(Boolean)
+                .forEach((line) => addLog(`ESP32-CAM > ${line}`));
+
+              if (
+                accumulated.includes('[WEB-FLASHER-ACK]') ||
+                accumulated.includes('[EI-FIRMWARE-ACK]') ||
+                accumulated.includes('[BOARD-READY]') ||
+                accumulated.includes('person (')
+              ) {
+                break;
+              }
+            }
+          }
+        } catch {
+          // Stream cancelled cleanly by timeout
+        } finally {
+          clearTimeout(cancelTimer);
+          await reader.cancel().catch(() => {});
+          try {
+            reader.releaseLock();
+          } catch {
+            // ignore
           }
         }
       }
 
       try {
-        reader.releaseLock();
+        await port.close();
       } catch {
-        // ignore
+        // ignore if already closed
       }
-      await port.close();
 
       setFlashProgress(100);
       addLog('NẠP THÀNH CÔNG 100%: Bo mạch ESP32-CAM đã lưu cấu hình C++ Edge Impulse + Wi-Fi vào NVS Flash!');
@@ -773,6 +789,15 @@ void loop() {
                     </>
                   )}
                 </button>
+
+                <a
+                  href="/api/ingestion/firmware-binary"
+                  download="esp32cam_ocean_ei_firmware.bin"
+                  className="w-full sm:w-auto px-4 py-3.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 hover:text-white border border-blue-500/40 flex items-center justify-center gap-1.5 text-xs font-semibold transition-colors"
+                >
+                  <Download className="w-4 h-4 text-blue-400" />
+                  <span>Tải firmware.bin (1.06 MB)</span>
+                </a>
 
                 <button
                   onClick={copyManualCmd}

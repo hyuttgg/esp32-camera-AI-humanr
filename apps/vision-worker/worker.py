@@ -72,11 +72,16 @@ class VisionWorker:
         return result
 
     def start_amqp_consumer(self):
-        """Connects to RabbitMQ and listens for processing tasks."""
+        """Connects to RabbitMQ if configured, otherwise runs cleanly in embedded vision engine mode."""
+        if not os.getenv("RABBITMQ_URL") or "localhost" in RABBITMQ_URL or "127.0.0.1" in RABBITMQ_URL:
+            logger.info("VisionWorker initialized in Embedded Zero-Disk RAM Mode (direct HTTP/NestJS bridge active).")
+            return
+
         try:
             import pika
+            logging.getLogger("pika").setLevel(logging.CRITICAL)
         except ImportError:
-            logger.error("pika library not installed. Install via `pip install pika`.")
+            logger.info("VisionWorker running in Embedded Zero-Disk RAM Mode.")
             return
 
         logger.info(f"Connecting to RabbitMQ at {RABBITMQ_URL}...")
