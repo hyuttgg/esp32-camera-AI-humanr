@@ -3,6 +3,7 @@ import {
   Post,
   Body,
   Get,
+  Query,
   UseGuards,
   Request,
   UnauthorizedException,
@@ -67,6 +68,32 @@ export class AuthController {
     });
 
     return tokenData;
+  }
+
+  @Get('google/url')
+  @ApiOperation({ summary: 'Lấy đường dẫn (URL) đăng nhập Google OAuth2' })
+  getGoogleOAuthUrl() {
+    return this.authService.getGoogleOAuthUrl();
+  }
+
+  @Get('google/callback')
+  @ApiOperation({ summary: 'Xử lý Callback từ Google OAuth2 Redirect URI' })
+  async googleOAuthCallback(@Query('code') code: string, @Res() res: Response) {
+    if (!code) {
+      throw new BadRequestException('Thiếu mã xác thực (code) từ Google OAuth2');
+    }
+
+    const tokenData = await this.authService.handleGoogleCallback(code);
+
+    res.cookie('session_token', tokenData.accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 3600 * 1000,
+    });
+
+    const frontendUrl = process.env.CORS_ORIGINS?.split(',')[0] || '/';
+    return res.redirect(`${frontendUrl}?access_token=${encodeURIComponent(tokenData.accessToken)}`);
   }
 
   @Post('google')

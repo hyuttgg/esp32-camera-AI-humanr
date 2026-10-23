@@ -5,18 +5,23 @@
 CREATE DATABASE IF NOT EXISTS ocean_vision CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE ocean_vision;
 
--- 1. Bảng Users
+-- 1. Bảng Users (Hỗ trợ cả đăng nhập nội bộ & Google OAuth2 Sign-In)
 CREATE TABLE IF NOT EXISTS users (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     email VARCHAR(255) NOT NULL UNIQUE,
     username VARCHAR(100) NOT NULL UNIQUE,
+    full_name VARCHAR(150) NULL,
     password_hash VARCHAR(255) NOT NULL,
+    google_id VARCHAR(128) NULL UNIQUE,
+    auth_provider ENUM('LOCAL', 'GOOGLE') NOT NULL DEFAULT 'LOCAL',
+    avatar_url VARCHAR(512) NULL,
     status ENUM('ACTIVE', 'SUSPENDED', 'PENDING_MFA') NOT NULL DEFAULT 'ACTIVE',
     mfa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     mfa_secret VARCHAR(255) NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_users_email (email),
+    INDEX idx_users_google_id (google_id),
     INDEX idx_users_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

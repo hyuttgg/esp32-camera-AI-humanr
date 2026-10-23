@@ -68,7 +68,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       await conn.ping();
       conn.release();
       this.isMysqlConnected = true;
-      this.logger.log('MySQL 8.x Connection Pool established successfully.');
+      await this.ensureMysqlSchema();
+      this.logger.log('MySQL 8.x Connection Pool & Parameterized Schema established successfully.');
     } catch (err: any) {
       this.logger.warn(`MySQL connection unavailable (${err.message}). Activating In-Memory Fallback Adapter for local development.`);
       this.isMysqlConnected = false;
@@ -115,6 +116,58 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     // 4. Seed initial default demo data if in fallback mode
     this.seedFallbackData();
+  }
+
+  /**
+   * Thực thi truy vấn MySQL có tham số (Prepared Statement với dấu ? chống SQL Injection).
+   */
+  public async query<T = any>(sql: string, params: any[] = []): Promise<T> {
+    if (!this.mysqlPool || !this.isMysqlConnected) {
+      throw new Error('MySQL connection pool is not active');
+    }
+    const [rows] = await this.mysqlPool.execute(sql, params);
+    return rows as unknown as T;
+  }
+
+  private async ensureMysqlSchema() {
+    if (!this.mysqlPool) return;
+    await this.mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS users (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        username VARCHAR(100) NOT NULL UNIQUE,
+        full_name VARCHAR(150) NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        google_id VARCHAR(128) NULL UNIQUE,
+        auth_provider ENUM('LOCAL', 'GOOGLE') NOT NULL DEFAULT 'LOCAL',
+        avatar_url VARCHAR(512) NULL,
+        status ENUM('ACTIVE', 'SUSPENDED', 'PENDING') NOT NULL DEFAULT 'ACTIVE',
+        mfa_enabled TINYINT(1) NOT NULL DEFAULT 0,
+        mfa_secret VARCHAR(128) NULL,
+        last_login_at DATETIME NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_users_email (email),
+        INDEX idx_users_google_id (google_id),
+        INDEX idx_users_status (status)
+      ) ENGINE=InnoDB;
+    `);
+
+    await this.mysqlPool.execute(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        actor_type ENUM('USER', 'DEVICE', 'SYSTEM', 'RETENTION_WORKER') NOT NULL,
+        actor_id VARCHAR(128) NOT NULL,
+        action VARCHAR(100) NOT NULL,
+        target_type VARCHAR(64) NOT NULL,
+        target_id VARCHAR(128) NULL,
+        ip_address VARCHAR(45) NULL,
+        user_agent VARCHAR(512) NULL,
+        result ENUM('SUCCESS', 'DENIED', 'ERROR') NOT NULL DEFAULT 'SUCCESS',
+        metadata_json JSON NULL,
+        created_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+      ) ENGINE=InnoDB;
+    `);
   }
 
   private seedFallbackData() {
