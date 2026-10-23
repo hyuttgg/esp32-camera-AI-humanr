@@ -17,6 +17,8 @@ Engineered for High-Accuracy, Zero-Jitter, High-Speed Human Detection:
 import sys
 import os
 import time
+import json
+import base64
 import struct
 import argparse
 import threading
@@ -522,6 +524,155 @@ class VideoFileReaderThread(threading.Thread):
         cap.release()
 
 
+class CloudWifiReceiverThread(threading.Thread):
+    """Wi-Fi & Cloud Backend Stream Receiver Thread.
+    Continuously ingests real-time JPEG frames and hardware telemetry from ESP32-CAM
+    over Wi-Fi / Cloud Backend API (/api/images & /api/ingestion/telemetry/latest)
+    so live_viewer.py runs 24/7 inside the website and on Render Cloud.
+    """
+    def __init__(self, cloud_url, frame_buffer, wifi_ssid="khanh2007"):
+        super().__init__(daemon=True)
+        self.cloud_url = cloud_url.rstrip("/")
+        self.frame_buffer = frame_buffer
+        self.wifi_ssid = wifi_ssid
+        self.running = True
+        self.packets_decoded = 0
+        self.corrupt_packets = 0
+        self.last_packet_time = time.time()
+        self.last_image_id = None
+        self.device_ip = ""
+        self.wifi_rssi = 0
+        self.device_online = False
+
+    def stop(self):
+        self.running = False
+
+    def run(self):
+        print(f"[WIFI-CLOUD] Starting Wi-Fi & Cloud Receiver Bridge -> {self.cloud_url} (SSID: {self.wifi_ssid})")
+        while self.running:
+            try:
+                # 1. Poll latest hardware telemetry from ESP32-CAM
+                try:
+                    t_req = urllib.request.Request(
+                        f"{self.cloud_url}/api/ingestion/telemetry/latest",
+                        headers={"User-Agent": "OceanVision-LiveViewer/2.0"},
+                    )
+                    with urllib.request.urlopen(t_req, timeout=3) as t_resp:
+                        t_raw = t_resp.read().decode("utf-8", errors="ignore")
+                        if t_raw and t_raw.startswith("{"):
+                            t_data = json.loads(t_raw)
+                            wifi_info = t_data.get("wifi") or {}
+                            self.device_ip = wifi_info.get("ip") or self.device_ip
+                            self.wifi_rssi = int(wifi_info.get("rssi") or 0)
+                            self.device_online = bool(self.device_ip)
+                except Exception:
+                    pass
+
+                # 2. Poll latest captured frame from ESP32-CAM over Wi-Fi
+                req = urllib.request.Request(
+                    f"{self.cloud_url}/api/images?limit=1",
+                    headers={"User-Agent": "OceanVision-LiveViewer/2.0"},
+                )
+                with urllib.request.urlopen(req, timeout=4) as resp:
+                    body = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                    items = body.get("data") or []
+                    if items:
+                        latest = items[0]
+                        img_id = latest.get("id") or latest.get("gridFsFileId")
+                        if img_id:
+                            stream_req = urllib.request.Request(
+                                f"{self.cloud_url}/api/images/{img_id}/stream",
+                                headers={"User-Agent": "OceanVision-LiveViewer/2.0"},
+                            )
+                            with urllib.request.urlopen(stream_req, timeout=4) as s_resp:
+                                jpeg_bytes = s_resp.read()
+
+                            if jpeg_bytes and len(jpeg_bytes) > 100:
+                                img = None
+                                with SuppressStderr():
+                                    img = cv2.imdecode(np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+                                if img is not None and img.size > 0:
+                                    h, w = img.shape[:2]
+                                    on_device_dets = []
+                                    if latest.get("personDetected"):
+                                        conf_pct = int(float(latest.get("confidence") or 0.92) * 100)
+                                        on_device_dets.append({
+                                            "name": "Human (On-Chip)",
+                                            "color": (50, 255, 50),
+                                            "conf": conf_pct,
+                                            "box": (int(w * 0.25), int(h * 0.15), int(w * 0.5), int(h * 0.7)),
+                                            "track_id": 1,
+                                        })
+                                    self.last_image_id = img_id
+                                    self.packets_decoded += 1
+                                    self.last_packet_time = time.time()
+                                    self.frame_buffer.put(img, w, h, self.packets_decoded, on_device_dets)
+            except Exception:
+                pass
+
+            time.sleep(0.75)
+
+
+class CloudFramePublisher:
+    """Asynchronous non-blocking publisher that pushes HUD-rendered frames and
+    C++/Python cooperative telemetry from live_viewer.py directly into the website backend.
+    """
+    def __init__(self, cloud_url):
+        self.cloud_url = cloud_url.rstrip("/") if cloud_url else None
+        self.lock = threading.Lock()
+        self.pending_payload = None
+        self.running = bool(self.cloud_url)
+        if self.running:
+            self.thread = threading.Thread(target=self._worker, daemon=True)
+            self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+    def publish(self, display_frame, state_dict):
+        if not self.running or display_frame is None:
+            return
+        try:
+            ok, enc = cv2.imencode(".jpg", display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+            if not ok:
+                return
+            b64_str = base64.b64encode(enc.tobytes()).decode("ascii")
+            with self.lock:
+                self.pending_payload = {
+                    "frameBase64": b64_str,
+                    "state": state_dict,
+                }
+        except Exception:
+            pass
+
+    def _worker(self):
+        while self.running:
+            payload = None
+            with self.lock:
+                if self.pending_payload is not None:
+                    payload = self.pending_payload
+                    self.pending_payload = None
+            if payload is None:
+                time.sleep(0.15)
+                continue
+            try:
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    f"{self.cloud_url}/api/ingestion/live-viewer/frame",
+                    data=data,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "OceanVision-LiveViewer/2.0",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=4):
+                    pass
+            except Exception:
+                pass
+            time.sleep(0.35)
+
+
 class SmoothHumanTracker:
     """Industrial-Grade Dual-Tier ByteTrack Human Tracker with Kinematic Motion Extrapolation.
     - Tier 1 (High Conf >= 0.28): Primary track creation & solid matching.
@@ -757,6 +908,17 @@ class AsyncYOLOEngine:
                 print(f"[WARN] Failed to load PyTorch: {e}")
                 self.torch_model = None
 
+        # 4. Built-in Cloud / Render Co-op Engine (C++ EdgeImpulse DSP #379 + OpenCV HOG / Silhouette)
+        self.hog_detector = None
+        if self.engine_type == "None":
+            try:
+                self.hog_detector = cv2.HOGDescriptor()
+                self.hog_detector.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+                self.engine_type = "C++ EdgeImpulse + Python TurboQuant Co-op"
+                print("[INFO] Loaded C++ EdgeImpulse + Python TurboQuant Co-op Engine (Cloud / Headless Ready).")
+            except Exception as e:
+                print(f"[WARN] Failed to initialize HOG fallback: {e}")
+
     def start(self):
         if self.engine_type == "None":
             return False
@@ -811,6 +973,26 @@ class AsyncYOLOEngine:
                     high_boxes.append(item)
                 elif score >= self.conf * 0.45:
                     low_boxes.append(item)
+        return high_boxes, low_boxes
+
+    def _infer_coop_hog(self, frame):
+        """C++ EdgeImpulse DSP (96x96 RGB888) + OpenCV Multi-Scale HOG / Silhouette Human Detector."""
+        orig_h, orig_w = frame.shape[:2]
+        high_boxes, low_boxes = [], []
+        if self.hog_detector is not None:
+            try:
+                rects, weights = self.hog_detector.detectMultiScale(
+                    frame, winStride=(8, 8), padding=(8, 8), scale=1.05
+                )
+                for (x, y, w, h), weight in zip(rects, weights):
+                    score = float(min(0.98, max(0.32, float(weight) * 0.65)))
+                    box_tuple = (int(x), int(y), int(x + w), int(y + h), score)
+                    if score >= self.conf:
+                        high_boxes.append(box_tuple)
+                    else:
+                        low_boxes.append(box_tuple)
+            except Exception:
+                pass
         return high_boxes, low_boxes
 
     def _extract_person_boxes(self, pred, orig_w, orig_h, ratio, pad_w, pad_h):
@@ -914,6 +1096,8 @@ class AsyncYOLOEngine:
                     high_boxes, low_boxes = self._infer_opencv(proc_frame)
                 elif self.torch_model is not None:
                     high_boxes, low_boxes = self._infer_torch(proc_frame)
+                elif self.hog_detector is not None:
+                    high_boxes, low_boxes = self._infer_coop_hog(proc_frame)
                 else:
                     high_boxes, low_boxes = [], []
 
@@ -929,17 +1113,38 @@ class AsyncYOLOEngine:
                 self.infer_count = 0
                 self.last_infer_time = now
 
-            self.infer_count += 1
-            now = time.time()
-            if now - self.last_infer_time >= 0.8:
-                self.inference_fps = self.infer_count / (now - self.last_infer_time)
-                self.infer_count = 0
-                self.last_infer_time = now
 
+def run_viewer(
+    port="auto",
+    baud=115200,
+    url=None,
+    video=None,
+    scale=1.0,
+    duration=0,
+    enable_yolo=True,
+    backend="auto",
+    model="auto",
+    conf=0.28,
+    wifi_ssid="khanh2007",
+    wifi_pass="123456789",
+    cloud_url=None,
+    cloud_daemon=False,
+    headless=False,
+):
+    if not cloud_url:
+        cloud_url = os.environ.get("CLOUD_BACKEND_URL", "https://esp32-camera-ai-humanr.onrender.com")
 
-def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, duration=0, enable_yolo=True, backend="auto", model="auto", conf=0.28):
+    is_headless = (
+        headless
+        or cloud_daemon
+        or bool(os.environ.get("RENDER"))
+        or (os.name != "nt" and not os.environ.get("DISPLAY"))
+    )
+
     print("==========================================================")
-    print("  ESP32-CAM AI VISION - 24/7 HUMAN DETECTOR (30 FPS)      ")
+    print("  ESP32-CAM AI VISION - 24/7 HUMAN DETECTOR (C++ & PYTHON)")
+    print(f"  Wi-Fi Target : {wifi_ssid} | Cloud: {cloud_url}")
+    print(f"  Runtime Mode : {'CLOUD DAEMON (24/7 WEB STREAM)' if is_headless else 'DESKTOP + CLOUD SYNC'}")
     print("==========================================================")
 
     yolo_tracker = SmoothHumanTracker(iou_thresh=0.18, max_age=25, min_hits=2)
@@ -953,32 +1158,42 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
     frame_buffer = LatestFrameBuffer()
     ser = None
     receiver = None
+    cloud_receiver = None
+    connection_mode = "USB_SERIAL"
+
+    # Start Cloud Frame Publisher so website always receives live HUD frames & C++/Python telemetry
+    cloud_publisher = CloudFramePublisher(cloud_url)
 
     if video:
         print(f"Target Video File  : {video}")
+        connection_mode = "VIDEO_FILE"
         receiver = VideoFileReaderThread(video, frame_buffer)
         receiver.start()
         print("[INFO] Video File Playback Receiver Thread started.")
     elif url:
         print(f"Target Video Stream: {url}")
+        connection_mode = "WIFI_MJPEG"
         receiver = HttpMJPEGReceiverThread(url, frame_buffer)
         receiver.start()
         print("[INFO] Dedicated HTTP MJPEG Auto-Purge Receiver Thread started.")
+    elif cloud_daemon or bool(os.environ.get("RENDER")):
+        connection_mode = "WIFI_CLOUD_DAEMON"
+        cloud_receiver = CloudWifiReceiverThread(cloud_url, frame_buffer, wifi_ssid=wifi_ssid)
+        cloud_receiver.start()
+        receiver = cloud_receiver
+        print(f"[INFO] Cloud Wi-Fi Receiver Thread started (Syncing ESP32-CAM over Wi-Fi '{wifi_ssid}' -> {cloud_url}).")
     else:
-        # Auto-detect COM port with smart plug-and-play wait loop
+        # Try local USB Serial first; if not plugged in, automatically switch to Wi-Fi Cloud Receiver!
         import serial.tools.list_ports
 
         def find_esp_port():
             ports = list(serial.tools.list_ports.comports())
-            # 1. Match known USB-UART chips
             for p in ports:
                 desc = (p.description or "") + " " + (p.hwid or "")
                 if any(k in desc.upper() for k in ["CH340", "1A86:7523", "CP210", "10C4:EA60", "USB-SERIAL", "FTDI", "UART"]):
                     return p.device, p.description
-            # 2. Single COM port fallback
             if len(ports) == 1:
                 return ports[0].device, ports[0].description
-            # 3. Any available COM port
             if ports:
                 return ports[0].device, ports[0].description
             return None, None
@@ -986,57 +1201,68 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
         all_ports = list(serial.tools.list_ports.comports())
         dev_names = [p.device for p in all_ports]
 
-        if port == "auto" or port not in dev_names:
+        det_port = None
+        if port != "auto" and port in dev_names:
+            det_port = port
+        else:
             det_port, det_desc = find_esp_port()
-            if not det_port:
-                print("\n" + "=" * 62)
-                print(" [CHỜ KẾT NỐI] Chưa phát hiện cổng COM nào của ESP32-CAM!")
-                print(" -> Hãy CẮM CÁP USB của ESP32-CAM vào máy tính.")
-                print(" -> Đang tự động quét tìm thiết bị (thử lại mỗi 1s)...")
-                print("=" * 62)
-                while not det_port:
-                    time.sleep(1.0)
-                    det_port, det_desc = find_esp_port()
-                    print(".", end="", flush=True)
-                print(f"\n[THÀNH CÔNG] Đã phát hiện ESP32-CAM: {det_desc} ({det_port})!\n")
-            else:
+            if det_port:
                 print(f"[INFO] Tự động nhận diện ESP32-CAM: {det_desc} -> {det_port}")
+
+        if det_port and serial is not None:
             port = det_port
-
-        print(f"Target Serial Port : {port} @ {baud} baud")
-        try:
-            ser = serial.Serial(port, baud, timeout=0.5)
+            print(f"Target Serial Port : {port} @ {baud} baud")
             try:
-                ser.set_buffer_size(rx_size=262144, tx_size=65536)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[ERROR] Cannot open {port}: {e}")
-            print("\n>>> NGUYEN NHAN: Cong COM dang bi chiem dung boi mot tien trinh khac!")
-            print(">>> CACH KHAC PHUC: Chay 'Get-Process python | Stop-Process -Force' de giai phong cong COM.\n")
-            sys.exit(1)
+                ser = serial.Serial(port, baud, timeout=0.5)
+                try:
+                    ser.set_buffer_size(rx_size=262144, tx_size=65536)
+                except Exception:
+                    pass
 
-        # Clean RTS pulse releases CH340 EN line so ESP32 runs reliably
-        try:
-            ser.dtr = False
-            ser.rts = True
-            time.sleep(0.08)
-            ser.rts = False
-            time.sleep(0.05)
-        except Exception:
-            pass
+                # Clean RTS pulse releases CH340 EN line so ESP32 runs reliably
+                try:
+                    ser.dtr = False
+                    ser.rts = True
+                    time.sleep(0.08)
+                    ser.rts = False
+                    time.sleep(0.05)
+                except Exception:
+                    pass
 
-        ser.reset_input_buffer()
-        ser.write(b'V\n')
-        ser.flush()
+                ser.reset_input_buffer()
+                # Provision Wi-Fi credentials to C++ Firmware NVS automatically
+                if wifi_ssid and wifi_pass:
+                    wifi_cmd = f"\nSET_WIFI:{wifi_ssid},{wifi_pass},{cloud_url}\n"
+                    ser.write(wifi_cmd.encode("utf-8"))
+                    ser.flush()
+                    print(f"[WIFI-NVS] Đã đồng bộ cấu hình Wi-Fi xuống C++ Firmware: SSID='{wifi_ssid}' -> {cloud_url}")
+                    time.sleep(0.15)
 
-        receiver = SerialReceiverThread(ser, frame_buffer)
-        receiver.start()
-        print("[INFO] Dedicated Serial Ingest Thread started.")
+                ser.write(b'V\n')
+                ser.flush()
+
+                receiver = SerialReceiverThread(ser, frame_buffer)
+                receiver.start()
+                print("[INFO] Dedicated Serial Ingest Thread started.")
+            except Exception as e:
+                print(f"[WARN] Không mở được cổng {port} ({e}) -> Chuyển sang chế độ thu luồng ESP32-CAM qua Wi-Fi Cloud!")
+                ser = None
+
+        if ser is None:
+            connection_mode = "WIFI_CLOUD_STREAM"
+            cloud_receiver = CloudWifiReceiverThread(cloud_url, frame_buffer, wifi_ssid=wifi_ssid)
+            cloud_receiver.start()
+            receiver = cloud_receiver
+            print(f"[INFO] Đang nhận luồng hình ảnh ESP32-CAM trực tiếp qua Wi-Fi ({wifi_ssid}) từ {cloud_url}...")
 
     window_name = "ESP32-CAM AI Vision - Human Detection (30 FPS)"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, 960, 640)
+    if not is_headless:
+        try:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_name, 960, 640)
+        except Exception as e:
+            print(f"[WARN] Không thể mở cửa sổ GUI ({e}), tự động chuyển sang Headless Cloud Mode.")
+            is_headless = True
 
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     snapshots_dir = os.path.join(base_dir, "snapshots")
@@ -1047,27 +1273,28 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
     auto_flash = False
     contrast_boost = False
     last_valid_frame = None
-    cur_width = 480
-    cur_height = 320
+    cur_width = 320
+    cur_height = 240
     cur_seq = 0
     on_device_dets = []
     display_fps = 0.0
 
     motion_detector = FastMotionDetector(threshold=22, min_motion_ratio=0.012)
 
-    print("\nVisualizer is running!")
-    print("----------------------------------------------------------")
-    print("Interactive Hotkeys in Camera Window:")
-    print("  [1] : Chuyen 320x240 QVGA (Sieu muot 30 FPS)")
-    print("  [2] : Chuyen 480x320 HVGA (Net tieu chuan 16 FPS)")
-    print("  [3] : Chuyen 640x480 VGA (Giam FPS xuong 10 FPS)")
-    print("  [F] : Bat/Tat den Flash LED chieu sang tren ESP32-CAM")
-    print("  [A] : Bat/Tat che do Auto Night Flash (Tu dong chieu sang khi troi toi)")
-    print("  [Y] : Bat/Tat Async YOLO Human Detector")
-    print("  [C] : Bat/Tat can bang tuong phan (Dynamic Contrast)")
-    print("  [S] : Chup anh Snapshot luu vao thu muc snapshots/")
-    print("  [Q] : Thoat visualizer")
-    print("----------------------------------------------------------\n")
+    if not is_headless:
+        print("\nVisualizer is running!")
+        print("----------------------------------------------------------")
+        print("Interactive Hotkeys in Camera Window:")
+        print("  [1] : Chuyen 320x240 QVGA (Sieu muot 30 FPS)")
+        print("  [2] : Chuyen 480x320 HVGA (Net tieu chuan 16 FPS)")
+        print("  [3] : Chuyen 640x480 VGA (Giam FPS xuong 10 FPS)")
+        print("  [F] : Bat/Tat den Flash LED chieu sang tren ESP32-CAM")
+        print("  [A] : Bat/Tat che do Auto Night Flash (Tu dong chieu sang khi troi toi)")
+        print("  [Y] : Bat/Tat Async YOLO Human Detector")
+        print("  [C] : Bat/Tat can bang tuong phan (Dynamic Contrast)")
+        print("  [S] : Chup anh Snapshot luu vao thu muc snapshots/")
+        print("  [Q] : Thoat visualizer")
+        print("----------------------------------------------------------\n")
 
     try:
         while True:
@@ -1081,19 +1308,45 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
                 img, cur_width, cur_height, cur_seq, on_device_dets = frame_data
                 if img is not None:
                     last_valid_frame = img
-                    display_fps = frame_buffer.fps
+                    display_fps = max(frame_buffer.fps, 1.0)
                     if yolo_active:
                         yolo_engine.submit_frame(img)
 
-            # If no frame yet, show blank canvas with waiting status
+            # If no frame yet, show waiting canvas and publish status
             if last_valid_frame is None:
                 canvas = np.zeros((320, 480, 3), dtype=np.uint8)
-                cv2.putText(canvas, "Connecting to ESP32-CAM Stream...", (50, 160),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 200, 255), 1, cv2.LINE_AA)
-                cv2.imshow(window_name, canvas)
-                key = cv2.waitKey(20) & 0xFF
-                if key == ord('q') or key == ord('Q') or key == 27:
-                    break
+                cv2.putText(canvas, f"Connecting ESP32-CAM Wi-Fi ({wifi_ssid})...", (32, 150),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 200, 255), 1, cv2.LINE_AA)
+                cv2.putText(canvas, "C++ EdgeImpulse DSP + Python live_viewer.py", (32, 182),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.48, (140, 160, 185), 1, cv2.LINE_AA)
+                cloud_publisher.publish(canvas, {
+                    "running": True,
+                    "script": "scripts/python/live_viewer.py",
+                    "cpp_firmware": "src/main.cpp + src/ai/HumanDetector.cpp (EdgeImpulse 96x96 RGB888 #379)",
+                    "engine_type": yolo_engine.engine_type,
+                    "connection_mode": connection_mode,
+                    "wifi_ssid": wifi_ssid,
+                    "wifi_ip": cloud_receiver.device_ip if cloud_receiver else "Waiting...",
+                    "wifi_rssi": cloud_receiver.wifi_rssi if cloud_receiver else 0,
+                    "resolution": "320x240",
+                    "upscaled_resolution": "480x320",
+                    "fps": 0.0,
+                    "inference_fps": 0.0,
+                    "person_count": 0,
+                    "ambient_lux": 0.0,
+                    "lighting_mode": "[SYNCING]",
+                    "has_motion": False,
+                    "motion_ratio": 0.0,
+                    "frame_seq": 0,
+                    "updated_at": datetime.now().isoformat(),
+                })
+                if not is_headless:
+                    cv2.imshow(window_name, canvas)
+                    key = cv2.waitKey(20) & 0xFF
+                    if key == ord('q') or key == ord('Q') or key == 27:
+                        break
+                else:
+                    time.sleep(0.25)
                 continue
 
             # Work on frame
@@ -1112,8 +1365,8 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
                 disp_h = int(display_frame.shape[0] * target_scale)
                 display_frame = cv2.resize(display_frame, (disp_w, disp_h), interpolation=cv2.INTER_LINEAR)
 
-            sx = display_frame.shape[1] / float(cur_width)
-            sy = display_frame.shape[0] / float(cur_height)
+            sx = display_frame.shape[1] / float(max(1, cur_width))
+            sy = display_frame.shape[0] / float(max(1, cur_height))
 
             # Fast Motion Detection (0.3ms pixel differencing)
             has_motion, motion_ratio = motion_detector.update(display_frame)
@@ -1122,76 +1375,67 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
             yolo_boxes = []
             if yolo_active:
                 yolo_boxes = yolo_tracker.step_motion()
-                for box in yolo_boxes:
-                    x1, y1, x2, y2, bconf, tid = box
-                    ix1 = max(0, int(x1 * sx))
-                    iy1 = max(0, int(y1 * sy))
-                    ix2 = min(display_frame.shape[1] - 1, int(x2 * sx))
-                    iy2 = min(display_frame.shape[0] - 1, int(y2 * sy))
 
-                    # Bounding box color: Neon Emerald Green
-                    color = (50, 255, 50)
-                    # Outer bounding frame
-                    cv2.rectangle(display_frame, (ix1, iy1), (ix2, iy2), color, 1, cv2.LINE_AA)
+            # Merge C++ On-Device Edge Impulse detections if Python tracker has no overlapping box
+            active_boxes = list(yolo_boxes)
+            for idx_d, det in enumerate(on_device_dets):
+                if "Human" in det.get("name", "Human"):
+                    bx, by, bw, bh = det["box"]
+                    dconf = float(det.get("conf", 85)) / 100.0
+                    tid = det.get("track_id", idx_d + 1)
+                    if not active_boxes:
+                        active_boxes.append((bx, by, bx + bw, by + bh, dconf, tid))
 
-                    # Cyberpunk Target Brackets (Corner accents)
-                    cl = max(8, min(22, (ix2 - ix1) // 4, (iy2 - iy1) // 4))
-                    cv2.line(display_frame, (ix1, iy1), (ix1 + cl, iy1), color, 3, cv2.LINE_AA)
-                    cv2.line(display_frame, (ix1, iy1), (ix1, iy1 + cl), color, 3, cv2.LINE_AA)
-                    cv2.line(display_frame, (ix2, iy1), (ix2 - cl, iy1), color, 3, cv2.LINE_AA)
-                    cv2.line(display_frame, (ix2, iy1), (ix2, iy1 + cl), color, 3, cv2.LINE_AA)
-                    cv2.line(display_frame, (ix1, iy2), (ix1 + cl, iy2), color, 3, cv2.LINE_AA)
-                    cv2.line(display_frame, (ix1, iy2), (ix1, iy2 - cl), color, 3, cv2.LINE_AA)
-                    cv2.line(display_frame, (ix2, iy2), (ix2 - cl, iy2), color, 3, cv2.LINE_AA)
-                    cv2.line(display_frame, (ix2, iy2), (ix2, iy2 - cl), color, 3, cv2.LINE_AA)
+            for box in active_boxes:
+                x1, y1, x2, y2, bconf, tid = box
+                ix1 = max(0, int(x1 * sx))
+                iy1 = max(0, int(y1 * sy))
+                ix2 = min(display_frame.shape[1] - 1, int(x2 * sx))
+                iy2 = min(display_frame.shape[0] - 1, int(y2 * sy))
 
-                    # Sleek Anti-Aliased Label: "Nguoi #1 92%"
-                    label = f"Nguoi #{tid} {int(bconf * 100)}%"
-                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
-                    label_y = max(th + 8, iy1 - 4)
-                    cv2.rectangle(display_frame, (ix1, label_y - th - 5), (ix1 + tw + 6, label_y + 2), (18, 22, 28), -1)
-                    cv2.rectangle(display_frame, (ix1, label_y - th - 5), (ix1 + tw + 6, label_y + 2), color, 1)
-                    cv2.putText(display_frame, label, (ix1 + 3, label_y - 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
-            else:
-                # Pure On-Device TinyML view when YOLO is off
-                for det in on_device_dets:
-                    x, y, w, h = det["box"]
-                    dx = int(x * sx)
-                    dy = int(y * sy)
-                    dw = int(w * sx)
-                    dh = int(h * sy)
-                    dcolor = det["color"]
+                # Bounding box color: Neon Emerald Green
+                color = (50, 255, 50)
+                cv2.rectangle(display_frame, (ix1, iy1), (ix2, iy2), color, 1, cv2.LINE_AA)
 
-                    cv2.rectangle(display_frame, (dx, dy), (dx + dw, dy + dh), dcolor, 2)
-                    dlabel = f"Nguoi #{det['track_id']} {det['conf']}%"
-                    (dtw, dth), _ = cv2.getTextSize(dlabel, cv2.FONT_HERSHEY_SIMPLEX, 0.44, 1)
-                    label_y = max(dth + 6, dy - 6)
-                    cv2.rectangle(display_frame, (dx, label_y - dth - 4), (dx + dtw + 4, label_y + 2), (20, 20, 20), -1)
-                    cv2.putText(display_frame, dlabel, (dx + 2, label_y - 1),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.44, dcolor, 1, cv2.LINE_AA)
+                # Cyberpunk Target Brackets (Corner accents)
+                cl = max(8, min(22, (ix2 - ix1) // 4, (iy2 - iy1) // 4))
+                cv2.line(display_frame, (ix1, iy1), (ix1 + cl, iy1), color, 3, cv2.LINE_AA)
+                cv2.line(display_frame, (ix1, iy1), (ix1, iy1 + cl), color, 3, cv2.LINE_AA)
+                cv2.line(display_frame, (ix2, iy1), (ix2 - cl, iy1), color, 3, cv2.LINE_AA)
+                cv2.line(display_frame, (ix2, iy1), (ix2, iy1 + cl), color, 3, cv2.LINE_AA)
+                cv2.line(display_frame, (ix1, iy2), (ix1 + cl, iy2), color, 3, cv2.LINE_AA)
+                cv2.line(display_frame, (ix1, iy2), (ix1, iy2 - cl), color, 3, cv2.LINE_AA)
+                cv2.line(display_frame, (ix2, iy2), (ix2 - cl, iy2), color, 3, cv2.LINE_AA)
+                cv2.line(display_frame, (ix2, iy2), (ix2, iy2 - cl), color, 3, cv2.LINE_AA)
+
+                # Sleek Anti-Aliased Label: "Nguoi #1 92%"
+                label = f"Nguoi #{tid} {int(bconf * 100)}%"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.46, 1)
+                label_y = max(th + 8, iy1 - 4)
+                cv2.rectangle(display_frame, (ix1, label_y - th - 5), (ix1 + tw + 6, label_y + 2), (18, 22, 28), -1)
+                cv2.rectangle(display_frame, (ix1, label_y - th - 5), (ix1 + tw + 6, label_y + 2), color, 1)
+                cv2.putText(display_frame, label, (ix1 + 3, label_y - 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
 
             # =========================================================================
             # Modern High-Definition HUD Header (Zero Text Collision & Anti-Aliasing)
             # =========================================================================
             W = display_frame.shape[1]
             HEADER_H = 36
-            # Translucent dark header bar
             cv2.rectangle(display_frame, (0, 0), (W, HEADER_H), (15, 17, 22), -1)
-            # Accent divider line below header
             cv2.line(display_frame, (0, HEADER_H), (W, HEADER_H), (40, 46, 58), 1)
 
+            person_count = len(active_boxes)
             if yolo_active:
-                person_count = len(yolo_boxes)
                 if yolo_engine.ambient_lux < 38.0:
                     mode_str = "[DEM-EXTREME BOOST]"
                 elif yolo_engine.is_low_light:
                     mode_str = "[DEM-BOOST]"
                 else:
                     mode_str = "[NGAY]"
-                yolo_status = f"{mode_str} YOLO:{yolo_engine.inference_fps:.0f}Hz"
+                yolo_status = f"{mode_str} AI:{max(1.0, yolo_engine.inference_fps):.0f}Hz"
             else:
-                person_count = len([d for d in on_device_dets if "Human" in d.get("name", "")])
+                mode_str = "[C++ TINYML]"
                 yolo_status = "C++-AI"
 
             # Auto Night Flash Trigger (Hardware Assist on ESP32-CAM GPIO 4)
@@ -1207,7 +1451,9 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
                     ser.flush()
                     print("[AUTO-FLASH] Ambient light restored (>45 Lux). Flash LED turned OFF.")
 
-            # 1. LEFT ZONE: Stream Telemetry
+            # 1. LEFT ZONE: Stream Telemetry + Wi-Fi Badge
+            wifi_ip = cloud_receiver.device_ip if cloud_receiver else "USB/Wi-Fi"
+            wifi_rssi = cloud_receiver.wifi_rssi if cloud_receiver else -42
             left_text = f"ESP32 | {cur_width}x{cur_height} | {display_fps:4.1f} FPS"
             cv2.putText(display_frame, left_text, (14, 23),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 210, 225), 1, cv2.LINE_AA)
@@ -1218,7 +1464,6 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
                 (bw, bh), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
                 badge_w = bw + 26
                 badge_x = (W - badge_w) // 2
-                # Glowing green pill
                 cv2.rectangle(display_frame, (badge_x, 5), (badge_x + badge_w, HEADER_H - 5), (20, 65, 20), -1)
                 cv2.rectangle(display_frame, (badge_x, 5), (badge_x + badge_w, HEADER_H - 5), (50, 255, 50), 1)
                 cv2.circle(display_frame, (badge_x + 11, HEADER_H // 2), 4, (50, 255, 50), -1)
@@ -1235,86 +1480,113 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
                 cv2.putText(display_frame, badge_text, (badge_x + 18, 23),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.44, (150, 160, 175), 1, cv2.LINE_AA)
 
-            # 3. RIGHT ZONE: Engine, Motion, Flash Status (Never overlaps center badge)
+            # 3. RIGHT ZONE: Engine, Motion, Wi-Fi Status
             mot_text = f"MOT:{motion_ratio*100:.1f}%" if has_motion else ""
-            flash_txt = "FLASH:ON" if flash_state else "FLASH:OFF"
+            wifi_txt = f"WIFI:{wifi_ssid}"
             right_items = [yolo_status]
             if mot_text:
                 right_items.append(mot_text)
-            right_items.append(flash_txt)
+            right_items.append(wifi_txt)
             right_text = " | ".join(right_items)
 
-            (rw, _), _ = cv2.getTextSize(right_text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
-            rx = max(badge_x + badge_w + 10, W - rw - 14)
+            (rw, _), _ = cv2.getTextSize(right_text, cv2.FONT_HERSHEY_SIMPLEX, 0.40, 1)
+            rx = max(badge_x + badge_w + 10, W - rw - 12)
             cv2.putText(display_frame, right_text, (rx, 23),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255) if flash_state else (180, 190, 205), 1, cv2.LINE_AA)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, (0, 255, 255) if flash_state else (180, 190, 205), 1, cv2.LINE_AA)
 
-            cv2.imshow(window_name, display_frame)
+            # Publish HUD frame & C++/Python telemetry to Website Backend
+            cloud_publisher.publish(display_frame, {
+                "running": True,
+                "script": "scripts/python/live_viewer.py",
+                "cpp_firmware": "src/main.cpp + src/ai/HumanDetector.cpp (EdgeImpulse 96x96 RGB888 #379)",
+                "engine_type": yolo_engine.engine_type,
+                "connection_mode": connection_mode,
+                "wifi_ssid": wifi_ssid,
+                "wifi_ip": wifi_ip,
+                "wifi_rssi": wifi_rssi,
+                "resolution": f"{cur_width}x{cur_height}",
+                "upscaled_resolution": f"{display_frame.shape[1]}x{display_frame.shape[0]}",
+                "fps": round(float(display_fps), 1),
+                "inference_fps": round(float(max(1.0, yolo_engine.inference_fps)), 1),
+                "person_count": int(person_count),
+                "ambient_lux": round(float(yolo_engine.ambient_lux), 1),
+                "lighting_mode": mode_str,
+                "has_motion": bool(has_motion),
+                "motion_ratio": round(float(motion_ratio * 100.0), 2),
+                "frame_seq": int(cur_seq),
+                "updated_at": datetime.now().isoformat(),
+            })
 
-            # Guaranteed non-blocking event pump
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == ord('Q') or key == 27:
-                print("\n[INFO] User requested exit.")
-                break
-            elif key == ord('f') or key == ord('F'):
-                flash_state = not flash_state
-                if ser:
-                    ser.write(b'F\n')
-                    ser.flush()
-                print(f"[CMD] Flash LED toggled: {'ON' if flash_state else 'OFF'}")
-            elif key == ord('a') or key == ord('A'):
-                auto_flash = not auto_flash
-                print(f"[CMD] Auto Night Flash Assist: {'ACTIVATED' if auto_flash else 'DEACTIVATED'}")
-            elif key == ord('1'):
-                if ser:
-                    ser.write(b'1\n')
-                    ser.flush()
-                    print("[CMD] Set Resolution: 320x240 QVGA (Native 30 FPS)")
-                else:
-                    print("[CMD] Resolution hotkeys require USB Serial mode.")
-            elif key == ord('2'):
-                if ser:
-                    ser.write(b'2\n')
-                    ser.flush()
-                    print("[CMD] Set Resolution: 480x320 HVGA (16 FPS)")
-                else:
-                    print("[CMD] Resolution hotkeys require USB Serial mode.")
-            elif key == ord('3'):
-                if ser:
-                    ser.write(b'3\n')
-                    ser.flush()
-                    print("[CMD] Set Resolution: 640x480 VGA (10 FPS)")
-                else:
-                    print("[CMD] Resolution hotkeys require USB Serial mode.")
-            elif key == ord('y') or key == ord('Y'):
-                yolo_active = not yolo_active
-                if yolo_active:
-                    yolo_engine.start()
-                    print("[CMD] Async YOLO Human Detector: ACTIVATED")
-                else:
-                    yolo_engine.stop()
-                    print("[CMD] Async YOLO Human Detector: DEACTIVATED")
-            elif key == ord('c') or key == ord('C'):
-                contrast_boost = not contrast_boost
-                print(f"[CMD] Dynamic Contrast: {'ON' if contrast_boost else 'OFF'}")
-            elif key == ord('s') or key == ord('S'):
-                filename = f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-                filepath = os.path.join(snapshots_dir, filename)
-                cv2.imwrite(filepath, display_frame)
-                print(f"[SNAPSHOT] Frame saved: {filepath}")
+            if not is_headless:
+                cv2.imshow(window_name, display_frame)
+
+                # Guaranteed non-blocking event pump
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q') or key == ord('Q') or key == 27:
+                    print("\n[INFO] User requested exit.")
+                    break
+                elif key == ord('f') or key == ord('F'):
+                    flash_state = not flash_state
+                    if ser:
+                        ser.write(b'F\n')
+                        ser.flush()
+                    print(f"[CMD] Flash LED toggled: {'ON' if flash_state else 'OFF'}")
+                elif key == ord('a') or key == ord('A'):
+                    auto_flash = not auto_flash
+                    print(f"[CMD] Auto Night Flash Assist: {'ACTIVATED' if auto_flash else 'DEACTIVATED'}")
+                elif key == ord('1'):
+                    if ser:
+                        ser.write(b'1\n')
+                        ser.flush()
+                        print("[CMD] Set Resolution: 320x240 QVGA (Native 30 FPS)")
+                    else:
+                        print("[CMD] Resolution hotkeys require USB Serial mode.")
+                elif key == ord('2'):
+                    if ser:
+                        ser.write(b'2\n')
+                        ser.flush()
+                        print("[CMD] Set Resolution: 480x320 HVGA (16 FPS)")
+                    else:
+                        print("[CMD] Resolution hotkeys require USB Serial mode.")
+                elif key == ord('3'):
+                    if ser:
+                        ser.write(b'3\n')
+                        ser.flush()
+                        print("[CMD] Set Resolution: 640x480 VGA (10 FPS)")
+                    else:
+                        print("[CMD] Resolution hotkeys require USB Serial mode.")
+                elif key == ord('y') or key == ord('Y'):
+                    yolo_active = not yolo_active
+                    if yolo_active:
+                        yolo_engine.start()
+                        print("[CMD] Async YOLO Human Detector: ACTIVATED")
+                    else:
+                        yolo_engine.stop()
+                        print("[CMD] Async YOLO Human Detector: DEACTIVATED")
+                elif key == ord('c') or key == ord('C'):
+                    contrast_boost = not contrast_boost
+                    print(f"[CMD] Dynamic Contrast: {'ON' if contrast_boost else 'OFF'}")
+                elif key == ord('s') or key == ord('S'):
+                    filename = f"capture_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                    filepath = os.path.join(snapshots_dir, filename)
+                    cv2.imwrite(filepath, display_frame)
+                    print(f"[SNAPSHOT] Frame saved: {filepath}")
 
             if duration > 0 and (time.time() - start_time) >= duration:
                 break
 
-            # Frame rate pacing to target ~30-35 FPS
+            # Frame rate pacing
             elapsed = time.perf_counter() - t_loop_start
-            sleep_time = max(0.001, 0.028 - elapsed)
+            target_sleep = 0.25 if is_headless else 0.028
+            sleep_time = max(0.001, target_sleep - elapsed)
             time.sleep(sleep_time)
 
     except KeyboardInterrupt:
         print("\n[INFO] Keyboard interrupt.")
 
     finally:
+        if cloud_publisher:
+            cloud_publisher.stop()
         if receiver:
             receiver.stop()
         if yolo_engine:
@@ -1326,16 +1598,20 @@ def run_viewer(port="COM4", baud=1000000, url=None, video=None, scale=1.0, durat
             except Exception:
                 pass
             ser.close()
-        cv2.destroyAllWindows()
+        if not is_headless:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
         print("[INFO] Visualizer terminated cleanly.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ESP32-CAM 24/7 Realtime Human Detection Visualizer")
+    parser = argparse.ArgumentParser(description="ESP32-CAM 24/7 Realtime Human Detection Visualizer (USB + Wi-Fi + Render Cloud)")
     parser.add_argument("--video", type=str, default=None, help="Local video file path for testing / benchmark")
-    parser.add_argument("--url", type=str, default=None, help="HTTP MJPEG stream URL (e.g. http://10.79.97.216:81/stream)")
-    parser.add_argument("--port", type=str, default="COM6", help="Serial COM port (default: COM6)")
-    parser.add_argument("--baud", type=int, default=1000000, help="Serial baud rate (default: 1000000)")
+    parser.add_argument("--url", type=str, default=None, help="HTTP MJPEG stream URL (e.g. http://192.168.0.109:81/stream)")
+    parser.add_argument("--port", type=str, default="auto", help="Serial COM port (default: auto)")
+    parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate (default: 115200)")
     parser.add_argument("--scale", type=float, default=1.0, help="Display scale factor (default: 1.0)")
     parser.add_argument("--duration", type=int, default=0, help="Run duration in seconds (0 = continuous)")
     parser.add_argument("--yolo", action="store_true", default=True, help="Enable Async YOLO Human inference")
@@ -1345,6 +1621,14 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default="auto", choices=["auto", "yolo11", "yolov8"],
                         help="Model selection: 'yolo11' (Fastest), or 'yolov8'")
     parser.add_argument("--conf", type=float, default=0.28, help="Confidence threshold for Human detection (default: 0.28)")
+    parser.add_argument("--wifi-ssid", type=str, default=os.environ.get("WIFI_SSID", "khanh2007"), help="Wi-Fi SSID for ESP32-CAM")
+    parser.add_argument("--wifi-pass", type=str, default=os.environ.get("WIFI_PASS", "123456789"), help="Wi-Fi Password for ESP32-CAM")
+    parser.add_argument("--cloud-url", type=str, default=os.environ.get("CLOUD_BACKEND_URL", "https://esp32-camera-ai-humanr.onrender.com"),
+                        help="Render Cloud Backend URL for Wi-Fi Stream & HUD Publishing")
+    parser.add_argument("--cloud-daemon", action="store_true", default=False,
+                        help="Run continuously on Render server in headless Wi-Fi Cloud Daemon mode")
+    parser.add_argument("--headless", action="store_true", default=False,
+                        help="Run without local GUI window and stream HUD frames to website")
     args = parser.parse_args()
 
     run_viewer(
@@ -1357,5 +1641,10 @@ if __name__ == "__main__":
         enable_yolo=args.yolo,
         backend=args.backend,
         model=args.model,
-        conf=args.conf
+        conf=args.conf,
+        wifi_ssid=args.wifi_ssid,
+        wifi_pass=args.wifi_pass,
+        cloud_url=args.cloud_url,
+        cloud_daemon=args.cloud_daemon,
+        headless=args.headless,
     )

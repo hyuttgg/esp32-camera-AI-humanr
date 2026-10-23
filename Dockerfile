@@ -23,14 +23,16 @@ RUN npm run build
 FROM node:20-bookworm-slim
 WORKDIR /workspace
 
-# Install Python 3 runtime for AI Vision Worker & Serial Flasher
+# Install Python 3 runtime for AI Vision Worker, live_viewer.py & Serial Flasher
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Python Vision Worker & compiled ESP32-CAM firmware binaries
+# Copy Python Vision Worker, live_viewer.py & C++ ESP32-CAM firmware sources/binaries
 COPY apps/vision-worker ./apps/vision-worker
+COPY scripts ./scripts
 COPY human_detector.py ./human_detector.py
 COPY include ./include
 COPY src ./src

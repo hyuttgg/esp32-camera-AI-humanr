@@ -30,11 +30,22 @@ export const LiveStream: React.FC<LiveStreamProps> = ({
   const [aspectRatio, setAspectRatio] = useState<'4:3' | '16:9'>('4:3');
   const [showScanlines, setShowScanlines] = useState(true);
   const [showDetections, setShowDetections] = useState(true);
+  const [usePythonHud, setUsePythonHud] = useState(true);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [liveStreamUrl, setLiveStreamUrl] = useState<string>('');
+  const [liveStreamUrl, setLiveStreamUrl] = useState<string>('/api/ingestion/live-viewer/stream.jpg');
+  const [streamTick, setStreamTick] = useState<number>(Date.now());
 
   useEffect(() => {
-    if (latestImage && latestImage.id) {
+    const timer = setInterval(() => {
+      setStreamTick(Date.now());
+    }, 900);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (usePythonHud) {
+      setLiveStreamUrl(`/api/ingestion/live-viewer/stream.jpg?t=${streamTick}`);
+    } else if (latestImage && latestImage.id) {
       // Load real binary JPEG stream from backend GridFS
       setLiveStreamUrl(`/api/images/${latestImage.id}/stream`);
     } else {
@@ -46,7 +57,7 @@ export const LiveStream: React.FC<LiveStreamProps> = ({
       );
       setLiveStreamUrl(url);
     }
-  }, [device, latestImage]);
+  }, [device, latestImage, usePythonHud, streamTick]);
 
   const handleCaptureClick = async () => {
     setIsCapturing(true);
@@ -73,6 +84,18 @@ export const LiveStream: React.FC<LiveStreamProps> = ({
 
         {/* Stream Controls */}
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setUsePythonHud(!usePythonHud)}
+            className={`px-2.5 py-1 rounded-lg border text-xs font-mono transition-colors ${
+              usePythonHud
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 font-semibold'
+                : 'bg-ocean-850 text-slate-400 border-ocean-800 hover:text-white'
+            }`}
+            title="Chuyển đổi giữa luồng HUD Python live_viewer.py + C++ và luồng JPEG thô"
+          >
+            {usePythonHud ? 'Python + C++ HUD (live_viewer.py)' : 'Raw GridFS JPEG'}
+          </button>
+
           {/* Scanline toggle */}
           <button
             onClick={() => setShowScanlines(!showScanlines)}

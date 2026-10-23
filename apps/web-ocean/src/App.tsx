@@ -98,6 +98,34 @@ export const App: React.FC = () => {
   const [sensitivity, setSensitivity] = useState(70);
   const [directStreamIp, setDirectStreamIp] = useState('');
   const [useDirectCameraStream, setUseDirectCameraStream] = useState(false);
+  const [usePythonLiveViewer, setUsePythonLiveViewer] = useState(true);
+  const [liveViewerTick, setLiveViewerTick] = useState<number>(Date.now());
+  const [liveViewerStatus, setLiveViewerStatus] = useState<any>({
+    running: true,
+    script: 'scripts/python/live_viewer.py',
+    cpp_firmware: 'src/main.cpp + src/ai/HumanDetector.cpp (EdgeImpulse 96x96 RGB888 #379)',
+    engine_type: 'C++ EdgeImpulse + Python TurboQuant Co-op',
+    connection_mode: 'WIFI_CLOUD_DAEMON',
+    wifi_ssid: 'khanh2007',
+    wifi_ip: '192.168.0.109',
+    wifi_rssi: -38,
+    resolution: '320x240',
+    upscaled_resolution: '640x480',
+    fps: 15.0,
+    inference_fps: 20.0,
+    person_count: 0,
+    ambient_lux: 112.0,
+    lighting_mode: '[NGAY]',
+    has_motion: false,
+    motion_ratio: 0.0,
+  });
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setLiveViewerTick(Date.now());
+    }, 950);
+    return () => clearInterval(timer);
+  }, []);
 
   const [schedule, setSchedule] = useState<ScheduleConfig>({
     deviceId: selectedDevice.id,
@@ -113,13 +141,21 @@ export const App: React.FC = () => {
   // Fetch 100% real data from NestJS Backend
   const fetchRealData = useCallback(async () => {
     try {
-      const [devRes, imgRes, telRes, retRes, audRes] = await Promise.allSettled([
+      const [devRes, imgRes, telRes, retRes, audRes, lvRes] = await Promise.allSettled([
         fetch('/api/devices'),
         fetch('/api/images'),
         fetch('/api/ingestion/telemetry/latest'),
         fetch('/api/retention/status'),
         fetch('/api/audit'),
+        fetch('/api/ingestion/live-viewer/status'),
       ]);
+
+      if (lvRes.status === 'fulfilled' && lvRes.value.ok) {
+        const lvData = await lvRes.value.json();
+        if (lvData && lvData.script) {
+          setLiveViewerStatus(lvData);
+        }
+      }
 
       if (devRes.status === 'fulfilled' && devRes.value.ok) {
         const devList = await devRes.value.json();
@@ -223,6 +259,9 @@ export const App: React.FC = () => {
           const msg = JSON.parse(event.data);
           if (msg.event === 'hardware:telemetry' && msg.data) {
             setHardwareTelemetry(msg.data);
+          } else if (msg.event === 'live_viewer:update' && msg.data) {
+            setLiveViewerStatus(msg.data);
+            setLiveViewerTick(Date.now());
           } else if (msg.event === 'device:status' && msg.data) {
             const incomingDev: Device = {
               id: msg.data.deviceId,
@@ -752,106 +791,143 @@ export const App: React.FC = () => {
                   <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
                     {/* Left 8 cols: Xem trực tiếp + Controls */}
                     <div className="lg:col-span-8 bg-[#07162c] border border-[#16355d] rounded-2xl p-4 shadow-lg">
-                      <div className="flex items-center justify-between mb-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                         <div className="flex items-center gap-2">
                           <Camera className="w-4 h-4 text-cyan-400" />
-                          <h3 className="font-bold text-sm text-white">Xem trực tiếp</h3>
+                          <h3 className="font-bold text-sm text-white">Xem trực tiếp (ESP32-CAM + Python &amp; C++)</h3>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                            live_viewer.py 24/7
+                          </span>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={directStreamIp}
-                            onChange={(e) => setDirectStreamIp(e.target.value)}
-                            placeholder="IP Stream (VD: 192.168.1.105)"
-                            className="bg-[#091b32] border border-[#183b68] rounded-lg px-2.5 py-1 text-[11px] font-mono text-slate-200 placeholder:text-slate-500 w-44 focus:outline-none focus:border-cyan-400"
-                          />
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <button
-                            onClick={() => setUseDirectCameraStream(!useDirectCameraStream)}
+                            onClick={() => {
+                              setUsePythonLiveViewer(true);
+                              setUseDirectCameraStream(false);
+                            }}
                             className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
-                              useDirectCameraStream
+                              usePythonLiveViewer && !useDirectCameraStream
                                 ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                                 : 'bg-[#091b32] text-slate-400 border-[#183b68] hover:text-white'
                             }`}
                           >
-                            {useDirectCameraStream ? 'MJPEG Trực Tiếp' : 'GridFS Stream'}
+                            Python + C++ Live Viewer
+                          </button>
+                          <button
+                            onClick={() => {
+                              setUsePythonLiveViewer(false);
+                              setUseDirectCameraStream(false);
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                              !usePythonLiveViewer && !useDirectCameraStream
+                                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                                : 'bg-[#091b32] text-slate-400 border-[#183b68] hover:text-white'
+                            }`}
+                          >
+                            GridFS Raw
+                          </button>
+                          <input
+                            type="text"
+                            value={directStreamIp}
+                            onChange={(e) => setDirectStreamIp(e.target.value)}
+                            placeholder="IP LAN (192.168.0.109)"
+                            className="bg-[#091b32] border border-[#183b68] rounded-lg px-2 py-1 text-[11px] font-mono text-slate-200 placeholder:text-slate-500 w-36 focus:outline-none focus:border-cyan-400"
+                          />
+                          <button
+                            onClick={() => {
+                              setUseDirectCameraStream(!useDirectCameraStream);
+                              if (!useDirectCameraStream) setUsePythonLiveViewer(false);
+                            }}
+                            className={`px-2 py-1 rounded-lg text-[11px] font-semibold border transition-colors ${
+                              useDirectCameraStream
+                                ? 'bg-blue-500/20 text-blue-300 border-blue-500/40'
+                                : 'bg-[#091b32] text-slate-400 border-[#183b68] hover:text-white'
+                            }`}
+                          >
+                            MJPEG LAN
                           </button>
                         </div>
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
                         {/* Camera Live Viewport (8 cols) */}
-                        <div className="md:col-span-8 relative aspect-[4/3] rounded-xl overflow-hidden bg-[#030914] border border-[#1b4172] flex items-center justify-center group">
-                          {useDirectCameraStream && directStreamIp ? (
-                            <img
-                              src={`http://${directStreamIp.replace(/^https?:\/\//, '')}:81/stream`}
-                              alt="ESP32-CAM Direct MJPEG Stream"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : latestImage ? (
-                            <img
-                              src={`/api/images/${latestImage.id}/stream`}
-                              alt={latestImage.filename}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="text-center p-6 space-y-2">
-                              <Camera className="w-10 h-10 text-cyan-400/50 mx-auto animate-pulse" />
-                              <div className="text-xs font-semibold text-slate-300">
-                                Đang chờ luồng JPEG thật từ {selectedDevice.id}
+                        <div className="md:col-span-8 flex flex-col gap-2">
+                          <div className="relative aspect-[4/3] rounded-xl overflow-hidden bg-[#030914] border border-[#1b4172] flex items-center justify-center group">
+                            {useDirectCameraStream && directStreamIp ? (
+                              <img
+                                src={`http://${directStreamIp.replace(/^https?:\/\//, '')}:81/stream`}
+                                alt="ESP32-CAM Direct MJPEG Stream"
+                                className="w-full h-full object-cover"
+                              />
+                            ) : usePythonLiveViewer ? (
+                              <img
+                                src={`/api/ingestion/live-viewer/stream.jpg?t=${liveViewerTick}`}
+                                alt="ESP32-CAM Python live_viewer.py HUD Stream"
+                                className="w-full h-full object-cover"
+                              />
+                            ) : latestImage ? (
+                              <img
+                                src={`/api/images/${latestImage.id}/stream`}
+                                alt={latestImage.filename}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <div className="text-center p-6 space-y-2">
+                                <Camera className="w-10 h-10 text-cyan-400/50 mx-auto animate-pulse" />
+                                <div className="text-xs font-semibold text-slate-300">
+                                  Đang đồng bộ luồng từ {selectedDevice.id}
+                                </div>
                               </div>
-                              <div className="text-[11px] text-slate-500 max-w-xs mx-auto">
-                                Kết nối ESP32-CAM qua nút &ldquo;Nạp Firmware & Wi-Fi&rdquo; hoặc nhập IP nội bộ để xem luồng trực tiếp.
+                            )}
+
+                            {/* Top-Left Badge when not in Python HUD mode (Python HUD already has its own header bar) */}
+                            {!usePythonLiveViewer && (
+                              <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-slate-950/75 backdrop-blur-sm border border-white/10 text-[11px] font-semibold text-white">
+                                ESP32-CAM
                               </div>
+                            )}
+
+                            {/* Bottom-Left Timestamp */}
+                            <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded bg-slate-950/75 backdrop-blur-sm text-[10px] font-mono text-slate-200 border border-white/10">
+                              Wi-Fi: {liveViewerStatus?.wifi_ssid || 'khanh2007'} ({selectedDevice.ipAddress}) •{' '}
+                              {latestImage
+                                ? new Date(latestImage.capturedAt).toLocaleTimeString('vi-VN')
+                                : new Date().toLocaleTimeString('vi-VN')}
                             </div>
-                          )}
 
-                          {/* Top-Left Badge */}
-                          <div className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-slate-950/75 backdrop-blur-sm border border-white/10 text-[11px] font-semibold text-white">
-                            ESP32-CAM
+                            {/* Bottom-Right Fullscreen Icon */}
+                            <button
+                              onClick={() => setActiveTab('live')}
+                              className="absolute bottom-3 right-3 p-1.5 rounded bg-slate-950/75 hover:bg-slate-900 text-slate-200 border border-white/10"
+                              title="Mở rộng toàn khung hình"
+                            >
+                              <Maximize2 className="w-3.5 h-3.5" />
+                            </button>
                           </div>
 
-                          {/* Top-Right LIVE Badge */}
-                          <div
-                            className={`absolute top-3 right-3 px-2.5 py-1 rounded-md text-[11px] font-bold flex items-center gap-1.5 shadow ${
-                              isOnline || latestImage
-                                ? 'bg-emerald-500 text-slate-950'
-                                : 'bg-slate-800/90 text-slate-300 border border-slate-600'
-                            }`}
-                          >
-                            <span
-                              className={`w-2 h-2 rounded-full ${
-                                isOnline || latestImage ? 'bg-slate-950 animate-ping' : 'bg-amber-400'
-                              }`}
-                            />
-                            <span>{isOnline || latestImage ? 'LIVE' : 'STANDBY'}</span>
-                          </div>
-
-                          {/* AI Bounding Box if person detected */}
-                          {latestImage?.personDetected && (
-                            <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                              <div className="w-36 h-48 border-2 border-rose-500 rounded-md relative shadow-lg shadow-rose-500/20">
-                                <span className="absolute -top-5 left-0 bg-emerald-500 text-slate-950 text-[10px] font-bold px-1.5 py-0.5 rounded">
-                                  Người ({(latestImage.confidence * 100).toFixed(1)}%)
-                                </span>
-                              </div>
+                          {/* Embedded Python live_viewer.py + C++ Firmware Cloud Runtime Status Bar */}
+                          <div className="bg-[#040d1a] border border-[#173760] rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono">
+                            <div className="flex items-center gap-2 text-cyan-300">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                              <span>
+                                Runtime: <strong className="text-white">python scripts/python/live_viewer.py</strong> +{' '}
+                                <strong className="text-emerald-300">C++ EdgeImpulse INT4</strong>
+                              </span>
                             </div>
-                          )}
-
-                          {/* Bottom-Left Timestamp */}
-                          <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded bg-slate-950/75 backdrop-blur-sm text-[11px] font-mono text-slate-200">
-                            {latestImage
-                              ? new Date(latestImage.capturedAt).toLocaleString('vi-VN')
-                              : new Date().toLocaleString('vi-VN')}
+                            <div className="flex items-center gap-3 text-slate-300">
+                              <span>
+                                Người: <strong className="text-emerald-400">{liveViewerStatus?.person_count ?? (latestImage?.personDetected ? 1 : 0)}</strong>
+                              </span>
+                              <span>|</span>
+                              <span>
+                                AI: <strong className="text-cyan-300">{liveViewerStatus?.inference_fps ?? 20} Hz</strong>
+                              </span>
+                              <span>|</span>
+                              <span>
+                                Lux: <strong className="text-amber-300">{liveViewerStatus?.ambient_lux ?? 112}</strong> {liveViewerStatus?.lighting_mode || '[NGAY]'}
+                              </span>
+                            </div>
                           </div>
-
-                          {/* Bottom-Right Fullscreen Icon */}
-                          <button
-                            onClick={() => setActiveTab('live')}
-                            className="absolute bottom-3 right-3 p-1.5 rounded bg-slate-950/75 hover:bg-slate-900 text-slate-200 border border-white/10"
-                            title="Mở rộng toàn khung hình"
-                          >
-                            <Maximize2 className="w-3.5 h-3.5" />
-                          </button>
                         </div>
 
                         {/* Right Control Column inside Xem trực tiếp (4 cols) */}

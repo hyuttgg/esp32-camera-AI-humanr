@@ -183,6 +183,60 @@ export class IngestionController {
   }
 
   /**
+   * Receive HUD-rendered frame + C++/Python telemetry from scripts/python/live_viewer.py
+   */
+  @Post('live-viewer/frame')
+  @ApiOperation({ summary: 'Nhận khung hình HUD + Telemetry từ scripts/python/live_viewer.py chạy trên Server/Cloud' })
+  async receiveLiveViewerFrame(@Body() body: any) {
+    if (body && typeof body.frameBase64 === 'string' && body.frameBase64.length > 50) {
+      this.db.liveViewerFrame = Buffer.from(body.frameBase64, 'base64');
+    }
+    if (body && body.state && typeof body.state === 'object') {
+      this.db.liveViewerState = {
+        ...this.db.liveViewerState,
+        ...body.state,
+        running: true,
+        updated_at: new Date().toISOString(),
+      };
+      this.telemetryGateway.broadcast('live_viewer:update', this.db.liveViewerState);
+    }
+    return { status: 'ACK', updatedAt: this.db.liveViewerState?.updated_at };
+  }
+
+  @Get('live-viewer/status')
+  @ApiOperation({ summary: 'Lấy trạng thái runtime trực tiếp của scripts/python/live_viewer.py + C++ Firmware' })
+  getLiveViewerStatus() {
+    return this.db.liveViewerState;
+  }
+
+  @Get('live-viewer/stream.jpg')
+  @ApiOperation({ summary: 'Trả về khung hình HUD trực tiếp từ scripts/python/live_viewer.py' })
+  async getLiveViewerStreamJpg(@Res() res: any) {
+    res.set({
+      'Content-Type': 'image/jpeg',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
+
+    if (this.db.liveViewerFrame && this.db.liveViewerFrame.length > 100) {
+      return res.end(this.db.liveViewerFrame);
+    }
+
+    // Fallback to latest GridFS captured frame if live_viewer.py is still warming up
+    const allImages = Array.from(this.db.mockImages.values());
+    if (allImages.length > 0) {
+      const latest = allImages[allImages.length - 1];
+      const fileData = this.db.mockGridFsFiles.get(latest.gridFsFileId || latest.id);
+      if (fileData && fileData.buffer) {
+        return res.end(fileData.buffer);
+      }
+    }
+
+    return res.status(204).end();
+  }
+
+  /**
    * Image JPEG Ingestion Stream.
    * Zero-Client Persistence: Writes directly to MongoDB GridFS.
    */

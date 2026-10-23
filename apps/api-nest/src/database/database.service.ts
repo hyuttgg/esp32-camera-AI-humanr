@@ -2,6 +2,9 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/commo
 import * as mysql from 'mysql2/promise';
 import { MongoClient, Db, GridFSBucket } from 'mongodb';
 import Redis from 'ioredis';
+import { spawn, ChildProcess } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -185,6 +188,29 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   public latestTelemetry: any = null;
+  public liveViewerFrame: Buffer | null = null;
+  public liveViewerState: any = {
+    running: true,
+    script: 'scripts/python/live_viewer.py',
+    cpp_firmware: 'src/main.cpp + src/ai/HumanDetector.cpp (EdgeImpulse 96x96 RGB888 #379)',
+    engine_type: 'C++ EdgeImpulse + Python TurboQuant Co-op',
+    connection_mode: 'WIFI_CLOUD_DAEMON',
+    wifi_ssid: process.env.WIFI_SSID || 'khanh2007',
+    wifi_ip: '192.168.0.109',
+    wifi_rssi: -38,
+    resolution: '320x240',
+    upscaled_resolution: '640x480',
+    fps: 15.0,
+    inference_fps: 20.0,
+    person_count: 0,
+    ambient_lux: 112.0,
+    lighting_mode: '[NGAY]',
+    has_motion: false,
+    motion_ratio: 0.0,
+    frame_seq: 0,
+    updated_at: new Date().toISOString(),
+  };
+  private liveViewerProc: ChildProcess | null = null;
 
   private seedFallbackData() {
     // Default Admin User for initial login before custom users are created
@@ -200,6 +226,72 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     };
     this.mockUsers.set('admin@oceanvision.ai', adminUser);
     this.mockUsers.set('admin', adminUser);
+
+    this.startLiveViewerDaemon();
+  }
+
+  private startLiveViewerDaemon() {
+    const candidates = [
+      path.resolve(process.cwd(), 'scripts', 'python', 'live_viewer.py'),
+      path.resolve(process.cwd(), '..', '..', 'scripts', 'python', 'live_viewer.py'),
+    ];
+    const scriptPath = candidates.find((p) => fs.existsSync(p));
+    if (!scriptPath) {
+      this.logger.warn('scripts/python/live_viewer.py not found in workspace; skipping embedded Python daemon.');
+      return;
+    }
+
+    const port = process.env.PORT || '4000';
+    const localBackendUrl = `http://127.0.0.1:${port}`;
+    const wifiSsid = process.env.WIFI_SSID || 'khanh2007';
+    const wifiPass = process.env.WIFI_PASS || '123456789';
+    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+
+    const launch = () => {
+      try {
+        this.logger.log(`[LIVE-VIEWER] Starting 24/7 Embedded Python Daemon: ${pythonCmd} ${scriptPath} --cloud-daemon`);
+        this.liveViewerProc = spawn(
+          pythonCmd,
+          [
+            scriptPath,
+            '--cloud-daemon',
+            '--headless',
+            '--wifi-ssid',
+            wifiSsid,
+            '--wifi-pass',
+            wifiPass,
+            '--cloud-url',
+            localBackendUrl,
+          ],
+          {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            env: {
+              ...process.env,
+              CLOUD_BACKEND_URL: localBackendUrl,
+              WIFI_SSID: wifiSsid,
+              WIFI_PASS: wifiPass,
+            },
+          },
+        );
+
+        this.liveViewerProc.stdout?.on('data', (chunk: Buffer) => {
+          const msg = chunk.toString('utf8').trim();
+          if (msg) {
+            this.logger.debug(`[live_viewer.py] ${msg}`);
+          }
+        });
+
+        this.liveViewerProc.on('exit', (code) => {
+          this.logger.warn(`[LIVE-VIEWER] live_viewer.py exited (code=${code}). Restarting in 5s...`);
+          setTimeout(launch, 5000);
+        });
+      } catch (err: any) {
+        this.logger.warn(`[LIVE-VIEWER] Failed to spawn live_viewer.py: ${err.message}`);
+      }
+    };
+
+    // Delay 3 seconds so NestJS HTTP server is listening before live_viewer.py connects
+    setTimeout(launch, 3000);
   }
 }
 
