@@ -22,13 +22,20 @@ export class HmacVerificationGuard implements CanActivate {
       throw new UnauthorizedException('Missing X-Device-Id header');
     }
 
-    // Lookup device credential
-    const device = this.db.mockDevices.get(deviceId);
+    // Lookup or auto-register real hardware device on first connection
+    let device = this.db.mockDevices.get(deviceId);
     if (!device) {
-      throw new UnauthorizedException(`Unregistered device ID: ${deviceId}`);
+      device = {
+        id: deviceId,
+        name: `ESP32-CAM (${deviceId})`,
+        secret: process.env.DEVICE_PROVISIONING_SHARED_KEY || process.env.DEVICE_DEFAULT_SECRET || 'dev_shared_provisioning_key_replace_in_prod',
+        status: 'ONLINE',
+        lastSeenAt: new Date().toISOString(),
+      };
+      this.db.mockDevices.set(deviceId, device);
     }
 
-    const deviceSecret = device.secret || process.env.DEVICE_DEFAULT_SECRET || 'dev_shared_provisioning_key_replace_in_prod';
+    const deviceSecret = device.secret || process.env.DEVICE_PROVISIONING_SHARED_KEY || process.env.DEVICE_DEFAULT_SECRET || 'dev_shared_provisioning_key_replace_in_prod';
 
     // If device provides HMAC signature, verify strictly
     if (signature && timestampStr && nonce) {

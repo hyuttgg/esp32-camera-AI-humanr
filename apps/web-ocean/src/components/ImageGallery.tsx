@@ -105,14 +105,14 @@ export const ImageGallery: React.FC<ImageGalleryProps> = ({ images, onDeleteImag
       </div>
 
       {/* Images Grid */}
+      {filteredImages.length === 0 ? (
+        <div className="bg-ocean-900 border border-ocean-800 rounded-2xl p-12 text-center text-slate-400 font-mono text-xs">
+          Chưa có ảnh nào được gửi lên từ ESP32-CAM thật. Khi ESP32-CAM chụp và gửi ảnh lên máy chủ, ảnh sẽ tự động hiển thị tại đây.
+        </div>
+      ) : (
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {filteredImages.map((img) => {
-          const imgPreviewUrl = createSvgDataUrl(
-            `FRAME: ${img.filename}`,
-            img.isDark,
-            img.personDetected,
-            img.id,
-          );
+          const imgPreviewUrl = `/api/images/${img.id}/stream`;
 
           return (
             <div
@@ -196,6 +196,7 @@ export const ImageGallery: React.FC<ImageGalleryProps> = ({ images, onDeleteImag
           );
         })}
       </div>
+      )}
 
       {/* Inspect Modal */}
       {inspectImage && (
@@ -215,12 +216,7 @@ export const ImageGallery: React.FC<ImageGalleryProps> = ({ images, onDeleteImag
 
             <div className="relative aspect-[4/3] max-h-80 w-full rounded-xl overflow-hidden bg-ocean-950 border border-ocean-700">
               <img
-                src={createSvgDataUrl(
-                  inspectImage.filename,
-                  inspectImage.isDark,
-                  inspectImage.personDetected,
-                  inspectImage.id,
-                )}
+                src={`/api/images/${inspectImage.id}/stream`}
                 alt={inspectImage.filename}
                 className="w-full h-full object-contain"
               />

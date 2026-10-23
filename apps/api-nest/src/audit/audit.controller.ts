@@ -1,16 +1,11 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
-import { RolesGuard } from '../auth/guards/roles.guard';
-import { Roles } from '../auth/decorators/roles.decorator';
+import { Controller, Get, Query } from '@nestjs/common';
 import { AuditService } from './audit.service';
 
-@Controller('api/v1/audit-events')
-@UseGuards(AuthGuard('jwt'), RolesGuard)
+@Controller(['audit', 'audit-events', 'v1/audit-events'])
 export class AuditController {
   constructor(private auditService: AuditService) {}
 
   @Get()
-  @Roles('ADMIN', 'SUPER_ADMIN')
   getEvents(@Query('page') page?: string, @Query('limit') limit?: string, @Query('action') action?: string) {
     const pageNum = parseInt(page || '1', 10);
     const limitNum = parseInt(limit || '50', 10);

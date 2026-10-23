@@ -184,8 +184,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
+  public latestTelemetry: any = null;
+
   private seedFallbackData() {
-    // Default Admin User
+    // Default Admin User for initial login before custom users are created
     const adminUser = {
       id: 1,
       email: 'admin@oceanvision.ai',
@@ -198,44 +200,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     };
     this.mockUsers.set('admin@oceanvision.ai', adminUser);
     this.mockUsers.set('admin', adminUser);
-
-    // Default Demo ESP32-CAM Devices
-    const demoCam1 = {
-      id: 'esp32-cam-01',
-      name: 'ESP32-CAM Cổng Chính (Lối vào sân vườn)',
-      deviceKeyId: 'key-esp32-01',
-      secret: 'dev_shared_provisioning_key_replace_in_prod',
-      status: 'ONLINE',
-      connectionMode: 'STA',
-      ipAddress: '192.168.1.105',
-      rssi: -54,
-      firmwareVersion: '1.0.0-turboquant',
-      lastSeenAt: new Date().toISOString(),
-      configVersion: 1,
-      uptimeSeconds: 15420,
-      freeHeapBytes: 158420,
-      freePsramBytes: 3824100,
-    };
-
-    const demoCam2 = {
-      id: 'esp32-cam-02',
-      name: 'ESP32-CAM Ban Công Tầng 2',
-      deviceKeyId: 'key-esp32-02',
-      secret: 'dev_shared_provisioning_key_replace_in_prod',
-      status: 'ONLINE',
-      connectionMode: 'STA',
-      ipAddress: '192.168.1.108',
-      rssi: -62,
-      firmwareVersion: '1.0.0-turboquant',
-      lastSeenAt: new Date(Date.now() - 35000).toISOString(),
-      configVersion: 1,
-      uptimeSeconds: 8430,
-      freeHeapBytes: 161200,
-      freePsramBytes: 3910200,
-    };
-
-    this.mockDevices.set('esp32-cam-01', demoCam1);
-    this.mockDevices.set('esp32-cam-02', demoCam2);
   }
 }
 

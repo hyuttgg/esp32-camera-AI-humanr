@@ -31,23 +31,21 @@ export const LiveStream: React.FC<LiveStreamProps> = ({
   const [showScanlines, setShowScanlines] = useState(true);
   const [showDetections, setShowDetections] = useState(true);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [simulatedFps, setSimulatedFps] = useState(29.8);
   const [liveStreamUrl, setLiveStreamUrl] = useState<string>('');
 
   useEffect(() => {
-    // Generate initial live preview SVG
-    const url = createSvgDataUrl(
-      `${device.name} [LIVE TURBOQUANT]`,
-      latestImage?.isDark ?? true,
-      latestImage?.personDetected ?? true,
-      latestImage?.id ?? 'live-001',
-    );
-    setLiveStreamUrl(url);
-
-    const interval = setInterval(() => {
-      setSimulatedFps(Number((29.5 + Math.random() * 0.8).toFixed(1)));
-    }, 2000);
-    return () => clearInterval(interval);
+    if (latestImage && latestImage.id) {
+      // Load real binary JPEG stream from backend GridFS
+      setLiveStreamUrl(`/api/images/${latestImage.id}/stream`);
+    } else {
+      const url = createSvgDataUrl(
+        device.status === 'ONLINE' ? `${device.name} [ONLINE]` : 'CHƯA KẾT NỐI THIẾT BỊ THẬT',
+        false,
+        false,
+        'waiting',
+      );
+      setLiveStreamUrl(url);
+    }
   }, [device, latestImage]);
 
   const handleCaptureClick = async () => {
@@ -62,11 +60,15 @@ export const LiveStream: React.FC<LiveStreamProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div className="flex items-center gap-2.5">
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-cyan-950/80 border border-cyan-800 text-cyan-300 font-mono text-xs">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>LIVE 30FPS</span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                device.status === 'ONLINE' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'
+              }`}
+            ></span>
+            <span>{device.status === 'ONLINE' ? 'ONLINE' : 'OFFLINE'}</span>
           </div>
           <span className="text-sm font-semibold text-white font-sans">{device.name}</span>
-          <span className="text-xs font-mono text-slate-400">({device.ipAddress})</span>
+          <span className="text-xs font-mono text-slate-400">({device.ipAddress || 'Chưa có IP'})</span>
         </div>
 
         {/* Stream Controls */}
@@ -144,7 +146,11 @@ export const LiveStream: React.FC<LiveStreamProps> = ({
         <div className="absolute top-3 left-3 flex flex-col gap-1.5 pointer-events-none font-mono text-[11px]">
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-ocean-950/80 backdrop-blur-md border border-cyan-500/30 text-cyan-300">
             <Activity className="w-3.5 h-3.5 text-cyan-400" />
-            <span>FPS: {simulatedFps} | BITRATE: 1.4 Mbps</span>
+            <span>
+              {latestImage
+                ? `FRAME: ${(latestImage.sizeBytes / 1024).toFixed(1)} KB | ${latestImage.width}x${latestImage.height}`
+                : 'CHỜ TÍN HIỆU TỪ ESP32-CAM'}
+            </span>
           </div>
 
           {latestImage?.isDark ? (

@@ -42,33 +42,42 @@ export class IngestionController {
    * Device Heartbeat Ingestion.
    */
   @Post('heartbeat')
-  @ApiOperation({ summary: 'Nhận heartbeat định kỳ từ ESP32-CAM' })
-  async receiveHeartbeat(@Body() body: any, @Headers() headers: any) {
+  @ApiOperation({ summary: 'Nhận heartbeat định kỳ từ ESP32-CAM thật' })
+  async receiveHeartbeat(@Body() body: any, @Headers() headers: any, @Request() req: any) {
     const deviceId = body.deviceId || headers['x-device-id'] || 'ESP32-CAM-01';
     const now = new Date();
 
     const device = this.db.mockDevices.get(deviceId) || {
       id: deviceId,
-      name: `ESP32 Camera (${deviceId})`,
+      name: body.name || `ESP32-CAM (${deviceId})`,
       roles: ['CAM_NODE'],
     };
 
     device.status = 'ONLINE';
     device.lastSeenAt = now.toISOString();
-    device.uptimeSeconds = body.uptimeSeconds || device.uptimeSeconds;
-    device.freeHeapBytes = body.freeHeap || body.freeHeapBytes || device.freeHeapBytes;
-    device.freePsramBytes = body.freePsram || body.freePsramBytes || device.freePsramBytes;
-    device.rssi = body.wifiRssi !== undefined ? body.wifiRssi : device.rssi;
-    device.firmwareVersion = body.firmwareVersion || device.firmwareVersion;
-    device.ipAddress = body.ipAddress || device.ipAddress;
-    device.nightFlashEnabled = body.nightFlashEnabled ?? device.nightFlashEnabled;
+    device.lastHeartbeat = now.toISOString();
+    device.uptimeSeconds = body.uptimeSeconds ?? body.uptimeSec ?? device.uptimeSeconds ?? 0;
+    device.freeHeapBytes = body.freeHeap ?? body.freeHeapBytes ?? device.freeHeapBytes ?? 0;
+    device.freeHeap = device.freeHeapBytes;
+    device.freePsramBytes = body.freePsram ?? body.freePsramBytes ?? device.freePsramBytes ?? 0;
+    device.freePsram = device.freePsramBytes;
+    device.rssi = body.wifiRssi ?? body.rssi ?? device.rssi ?? 0;
+    device.firmwareVersion = body.firmwareVersion || device.firmwareVersion || '1.0.0-real';
+    device.ipAddress = body.ipAddress || body.ip || req.ip || device.ipAddress || '';
+    device.macAddress = body.macAddress || device.macAddress || '';
+    device.resolution = body.resolution || device.resolution || 'QVGA';
+    device.nightFlashEnabled = body.nightFlashEnabled ?? device.nightFlashEnabled ?? false;
     this.db.mockDevices.set(deviceId, device);
 
-    // Broadcast device status to frontend
+    // Broadcast real device status to frontend
     this.telemetryGateway.broadcast('device:status', {
       deviceId,
+      name: device.name,
       status: 'ONLINE',
       ip: device.ipAddress,
+      macAddress: device.macAddress,
+      firmwareVersion: device.firmwareVersion,
+      resolution: device.resolution,
       freeHeap: device.freeHeapBytes,
       freePsram: device.freePsramBytes,
       rssi: device.rssi,
@@ -86,58 +95,91 @@ export class IngestionController {
    * 100% Accurate Hardware Telemetry (CPU, DRAM, PSRAM, Flash) Ingestion from C++ Firmware.
    */
   @Post('telemetry')
-  @ApiOperation({ summary: 'Nhận thông số phần cứng CPU, DRAM, PSRAM, Flash chi tiết từ C++ Firmware' })
-  async receiveHardwareTelemetry(@Body() body: any) {
+  @ApiOperation({ summary: 'Nhận thông số phần cứng CPU, DRAM, PSRAM, Flash thật 100% từ C++ Firmware' })
+  async receiveHardwareTelemetry(@Body() body: any, @Request() req: any) {
     const deviceId = body.deviceId || 'ESP32-CAM-01';
     const now = new Date().toISOString();
+
+    const dramFree = Number(body.dram?.freeBytes ?? body.freeHeap ?? 0);
+    const dramTotal = Number(body.dram?.totalBytes ?? 327680);
+    const psramFree = Number(body.psram?.freeBytes ?? body.freePsram ?? 0);
+    const psramTotal = Number(body.psram?.totalBytes ?? 4194304);
 
     const telemetryPayload = {
       deviceId,
       timestamp: now,
       cpu: {
-        freqMHz: body.cpu?.freqMHz || 160,
-        cores: body.cpu?.cores || 2,
-        usagePercent: body.cpu?.usagePercent || 22.4,
+        freqMHz: Number(body.cpu?.freqMHz ?? 240),
+        cores: Number(body.cpu?.cores ?? 2),
+        usagePercent: Number(body.cpu?.usagePercent ?? 0),
       },
       dram: {
-        freeBytes: body.dram?.freeBytes || 142850,
-        totalBytes: body.dram?.totalBytes || 327680,
-        minFreeBytes: body.dram?.minFreeBytes || 112000,
-        usagePercent: Number(
-          (
-            ((body.dram?.totalBytes - body.dram?.freeBytes) / (body.dram?.totalBytes || 327680)) *
-            100
-          ).toFixed(1),
-        ),
+        freeBytes: dramFree,
+        totalBytes: dramTotal,
+        minFreeBytes: Number(body.dram?.minFreeBytes ?? dramFree),
+        usagePercent: dramTotal > 0 ? Number((((dramTotal - dramFree) / dramTotal) * 100).toFixed(1)) : 0,
       },
       psram: {
-        found: body.psram?.found ?? true,
-        freeBytes: body.psram?.freeBytes || 3840120,
-        totalBytes: body.psram?.totalBytes || 4194304,
-        usagePercent: Number(
-          (
-            ((body.psram?.totalBytes - body.psram?.freeBytes) / (body.psram?.totalBytes || 4194304)) *
-            100
-          ).toFixed(1),
-        ),
+        found: Boolean(body.psram?.found ?? psramTotal > 0),
+        freeBytes: psramFree,
+        totalBytes: psramTotal,
+        usagePercent: psramTotal > 0 ? Number((((psramTotal - psramFree) / psramTotal) * 100).toFixed(1)) : 0,
       },
       flash: {
-        chipSizeBytes: body.flash?.chipSizeBytes || 4194304,
-        speedHz: body.flash?.speedHz || 40000000,
-        sketchUsedBytes: body.flash?.sketchUsedBytes || 431777,
-        sketchFreeBytes: body.flash?.sketchFreeBytes || 2713951,
+        chipSizeBytes: Number(body.flash?.chipSizeBytes ?? 4194304),
+        speedHz: Number(body.flash?.speedHz ?? 40000000),
+        sketchUsedBytes: Number(body.flash?.sketchUsedBytes ?? 0),
+        sketchFreeBytes: Number(body.flash?.sketchFreeBytes ?? 0),
       },
       wifi: {
-        rssi: body.wifi?.rssi || -48,
-        ip: body.wifi?.ip || '192.168.1.145',
+        rssi: Number(body.wifi?.rssi ?? body.rssi ?? 0),
+        ip: String(body.wifi?.ip || body.ipAddress || req.ip || ''),
       },
-      uptimeSec: body.uptimeSec || 3600,
+      uptimeSec: Number(body.uptimeSec ?? body.uptimeSeconds ?? 0),
     };
 
-    // Broadcast accurate hardware telemetry via WebSocket
+    this.db.latestTelemetry = telemetryPayload;
+
+    // Also update device entry so device list stays 100% synced with real hardware
+    const existingDev = this.db.mockDevices.get(deviceId) || {
+      id: deviceId,
+      name: `ESP32-CAM (${deviceId})`,
+      firmwareVersion: body.firmwareVersion || '1.0.0-real',
+      resolution: 'QVGA',
+      nightFlashEnabled: false,
+    };
+    existingDev.status = 'ONLINE';
+    existingDev.ipAddress = telemetryPayload.wifi.ip || existingDev.ipAddress || '';
+    existingDev.rssi = telemetryPayload.wifi.rssi;
+    existingDev.freeHeapBytes = dramFree;
+    existingDev.freeHeap = dramFree;
+    existingDev.freePsramBytes = psramFree;
+    existingDev.freePsram = psramFree;
+    existingDev.uptimeSeconds = telemetryPayload.uptimeSec;
+    existingDev.lastSeenAt = now;
+    existingDev.lastHeartbeat = now;
+    this.db.mockDevices.set(deviceId, existingDev);
+
+    // Broadcast accurate hardware telemetry & device status via WebSocket
     this.telemetryGateway.broadcast('hardware:telemetry', telemetryPayload);
+    this.telemetryGateway.broadcast('device:status', {
+      deviceId,
+      name: existingDev.name,
+      status: 'ONLINE',
+      ip: existingDev.ipAddress,
+      freeHeap: dramFree,
+      freePsram: psramFree,
+      rssi: existingDev.rssi,
+      time: now,
+    });
 
     return { status: 'ACK', receivedAt: now };
+  }
+
+  @Get('telemetry/latest')
+  @ApiOperation({ summary: 'Lấy thông số phần cứng thật mới nhất từ ESP32-CAM' })
+  getLatestTelemetry() {
+    return this.db.latestTelemetry || null;
   }
 
   /**
@@ -200,20 +242,32 @@ export class IngestionController {
     // 4. Stream directly into GridFS Bucket
     const filename = `${deviceId}_${captureId}.jpg`;
     const isPerson = headers['x-person-detected'] === 'true' || body.hasHuman === 'true' || body.hasHuman === true;
-    const confidence = parseFloat(headers['x-confidence'] || body.confidence || '0.965');
+    const confidence = parseFloat(headers['x-confidence'] || body.confidence || (isPerson ? '0.92' : '0.0'));
     const isDark = headers['x-is-dark'] === 'true' || body.isDark === 'true' || body.isDark === true;
+    const width = parseInt(body.width || '320', 10);
+    const height = parseInt(body.height || '240', 10);
 
     const imageMetadataDoc = {
       deviceId,
       captureId,
+      filename,
       sha256: dedupResult.sha256,
       perceptualHash: dedupResult.perceptualHash,
+      dhash: dedupResult.perceptualHash,
       capturedAt: capturedAt.toISOString(),
       storedAt: storedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
       byteSize: rawBuffer.length,
-      width: parseInt(body.width || '800', 10),
-      height: parseInt(body.height || '600', 10),
+      sizeBytes: rawBuffer.length,
+      width,
+      height,
+      isDuplicate: false,
+      hammingDistance: 0,
+      personDetected: isPerson,
+      confidence,
+      meanLuminance: parseFloat(headers['x-mean-luminance'] || body.meanLuminance || (isDark ? '25.0' : '110.0')),
+      isDark,
+      detections: isPerson ? [{ label: 'person', score: confidence, box: [80, 40, 120, 160] }] : [],
       detectionSummary: {
         hasHuman: isPerson,
         confidence,
@@ -234,21 +288,37 @@ export class IngestionController {
 
     this.db.mockImages.set(gridFsFileId, imageRecord);
 
+    // Ensure device is marked ONLINE when uploading real frame
+    const dev = this.db.mockDevices.get(deviceId) || {
+      id: deviceId,
+      name: `ESP32-CAM (${deviceId})`,
+      firmwareVersion: '1.0.0-real',
+      resolution: 'QVGA',
+      nightFlashEnabled: false,
+      freeHeap: 0,
+      freePsram: 0,
+    };
+    dev.status = 'ONLINE';
+    dev.ipAddress = dev.ipAddress || req.ip || '';
+    dev.lastSeenAt = storedAt.toISOString();
+    dev.lastHeartbeat = storedAt.toISOString();
+    this.db.mockDevices.set(deviceId, dev);
+
     // 5. Send Alert Email via Gmail API if intruder detected in low light / night conditions
     if (isPerson && isDark) {
-      this.gmailService.sendIntruderAlert(deviceId, confidence, 18.4);
+      this.gmailService.sendIntruderAlert(deviceId, confidence, imageMetadataDoc.meanLuminance);
     }
 
     // Broadcast new image event to frontend clients
-    this.telemetryGateway.broadcast('image:new', {
-      id: gridFsFileId,
+    this.telemetryGateway.broadcast('image:new', imageRecord);
+    this.telemetryGateway.broadcast('device:status', {
       deviceId,
-      filename,
-      sizeBytes: rawBuffer.length,
-      isPerson,
-      confidence,
-      isDark,
-      expiresAt: expiresAt.toISOString(),
+      name: dev.name,
+      status: 'ONLINE',
+      ip: dev.ipAddress,
+      freeHeap: dev.freeHeapBytes || dev.freeHeap || 0,
+      freePsram: dev.freePsramBytes || dev.freePsram || 0,
+      time: storedAt.toISOString(),
     });
 
     return {

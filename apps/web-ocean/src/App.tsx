@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Navbar } from './components/Navbar';
 import { DemoBanner } from './components/DemoBanner';
 import { LiveStream } from './components/LiveStream';
@@ -21,23 +21,33 @@ import {
   UserProfile,
 } from './types';
 import {
-  MOCK_DEVICES,
-  MOCK_IMAGES,
   MOCK_RETENTION,
-  MOCK_AUDIT_LOGS,
   MOCK_HARDWARE_TELEMETRY,
-  MOCK_USER,
 } from './mockData';
+
+const WAITING_DEVICE: Device = {
+  id: 'ESP32-CAM-01',
+  name: 'Chưa kết nối ESP32-CAM thật',
+  macAddress: '--:--:--:--:--:--',
+  ipAddress: 'Chưa kết nối',
+  firmwareVersion: 'Chờ nạp / kết nối',
+  status: 'OFFLINE',
+  lastHeartbeat: new Date().toISOString(),
+  nightFlashEnabled: false,
+  resolution: 'QVGA',
+  freeHeap: 0,
+  freePsram: 0,
+};
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('live');
-  const [devices, setDevices] = useState<Device[]>(MOCK_DEVICES);
-  const [selectedDevice, setSelectedDevice] = useState<Device>(MOCK_DEVICES[0]);
-  const [images, setImages] = useState<ImageMeta[]>(MOCK_IMAGES);
+  const [devices, setDevices] = useState<Device[]>([]);
+  const [selectedDevice, setSelectedDevice] = useState<Device>(WAITING_DEVICE);
+  const [images, setImages] = useState<ImageMeta[]>([]);
   const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicy>(MOCK_RETENTION);
-  const [auditLogs, setAuditLogs] = useState<AuditEvent[]>(MOCK_AUDIT_LOGS);
+  const [auditLogs, setAuditLogs] = useState<AuditEvent[]>([]);
   const [hardwareTelemetry, setHardwareTelemetry] = useState<HardwareTelemetryData>(MOCK_HARDWARE_TELEMETRY);
-  const [currentUser, setCurrentUser] = useState<UserProfile | null>(MOCK_USER);
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
   const [isTerminalOpen, setIsTerminalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isWifiFlasherOpen, setIsWifiFlasherOpen] = useState(false);
@@ -53,8 +63,108 @@ export const App: React.FC = () => {
     offlinePolicy: 'BUFFER_RAM',
   });
 
-  // WebSocket Live Telemetry Listener
+  // Fetch 100% real data from NestJS Backend
+  const fetchRealData = useCallback(async () => {
+    try {
+      const [devRes, imgRes, telRes, retRes, audRes] = await Promise.allSettled([
+        fetch('/api/devices'),
+        fetch('/api/images'),
+        fetch('/api/ingestion/telemetry/latest'),
+        fetch('/api/retention/status'),
+        fetch('/api/audit'),
+      ]);
+
+      if (devRes.status === 'fulfilled' && devRes.value.ok) {
+        const devList = await devRes.value.json();
+        if (Array.isArray(devList) && devList.length > 0) {
+          const normalized: Device[] = devList.map((d: any) => ({
+            id: d.id,
+            name: d.name || `ESP32-CAM (${d.id})`,
+            macAddress: d.macAddress || '--:--:--:--:--:--',
+            ipAddress: d.ipAddress || 'Đang kết nối',
+            firmwareVersion: d.firmwareVersion || '1.0.0-real',
+            status: d.status || 'ONLINE',
+            lastHeartbeat: d.lastSeenAt || d.lastHeartbeat || new Date().toISOString(),
+            nightFlashEnabled: Boolean(d.nightFlashEnabled),
+            resolution: d.resolution || 'QVGA',
+            freeHeap: Number(d.freeHeapBytes ?? d.freeHeap ?? 0),
+            freePsram: Number(d.freePsramBytes ?? d.freePsram ?? 0),
+          }));
+          setDevices(normalized);
+          setSelectedDevice((prev) => normalized.find((x) => x.id === prev.id) || normalized[0]);
+        }
+      }
+
+      if (imgRes.status === 'fulfilled' && imgRes.value.ok) {
+        const imgPayload = await imgRes.value.json();
+        const rawList = Array.isArray(imgPayload) ? imgPayload : imgPayload?.data || [];
+        const mappedImages: ImageMeta[] = rawList.map((img: any) => ({
+          id: img.id || img.gridFsFileId,
+          deviceId: img.deviceId,
+          filename: img.filename || `${img.deviceId}_${img.captureId || img.id}.jpg`,
+          capturedAt: img.capturedAt,
+          expiresAt: img.expiresAt,
+          sha256: img.sha256 || '',
+          dhash: img.dhash || img.perceptualHash || '',
+          sizeBytes: Number(img.sizeBytes ?? img.byteSize ?? 0),
+          width: Number(img.width ?? 320),
+          height: Number(img.height ?? 240),
+          isDuplicate: Boolean(img.isDuplicate),
+          hammingDistance: Number(img.hammingDistance ?? 0),
+          personDetected: Boolean(img.personDetected ?? img.detectionSummary?.hasHuman),
+          confidence: Number(img.confidence ?? img.detectionSummary?.confidence ?? 0),
+          meanLuminance: Number(img.meanLuminance ?? 50),
+          isDark: Boolean(img.isDark ?? img.detectionSummary?.isDark),
+          detections: img.detections || [],
+        }));
+        setImages(mappedImages);
+      }
+
+      if (telRes.status === 'fulfilled' && telRes.value.ok) {
+        const telData = await telRes.value.json();
+        if (telData && telData.deviceId) {
+          setHardwareTelemetry(telData);
+        }
+      }
+
+      if (retRes.status === 'fulfilled' && retRes.value.ok) {
+        const retData = await retRes.value.json();
+        if (retData && retData.mode) {
+          setRetentionPolicy((prev) => ({
+            ...prev,
+            mode: retData.mode,
+            retentionHours: retData.retentionHours ?? prev.retentionHours,
+            dailyCutoffTime: retData.dailyCutoffTime ?? prev.dailyCutoffTime,
+            totalPurgedCount: retData.totalPurgedCount ?? prev.totalPurgedCount,
+            totalPurgedBytes: retData.totalPurgedBytes ?? prev.totalPurgedBytes,
+          }));
+        }
+      }
+
+      if (audRes.status === 'fulfilled' && audRes.value.ok) {
+        const audData = await audRes.value.json();
+        const rawAud = Array.isArray(audData) ? audData : audData?.data || [];
+        const mappedAud: AuditEvent[] = rawAud.map((a: any) => ({
+          id: String(a.id),
+          action: a.action,
+          actor: a.actorId || a.actor || 'SYSTEM',
+          deviceId: a.targetId || a.deviceId,
+          details: a.details || `${a.action} on ${a.targetType || 'SYSTEM'}`,
+          ipAddress: a.ipAddress || '127.0.0.1',
+          timestamp: a.timestamp || a.createdAt || new Date().toISOString(),
+          status: a.result === 'SUCCESS' ? 'SUCCESS' : 'WARNING',
+        }));
+        setAuditLogs(mappedAud);
+      }
+    } catch (e) {
+      // Backend still starting up
+    }
+  }, []);
+
+  // WebSocket Live Real-Time Hardware & Image Stream Listener (No Fake Jitter!)
   useEffect(() => {
+    fetchRealData();
+
     let ws: WebSocket | null = null;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws/telemetry`;
@@ -67,13 +177,51 @@ export const App: React.FC = () => {
           if (msg.event === 'hardware:telemetry' && msg.data) {
             setHardwareTelemetry(msg.data);
           } else if (msg.event === 'device:status' && msg.data) {
-            setDevices((prev) =>
-              prev.map((d) =>
-                d.id === msg.data.deviceId
-                  ? { ...d, status: msg.data.status, freeHeap: msg.data.freeHeap, freePsram: msg.data.freePsram }
-                  : d,
-              ),
+            const incomingDev: Device = {
+              id: msg.data.deviceId,
+              name: msg.data.name || `ESP32-CAM (${msg.data.deviceId})`,
+              macAddress: msg.data.macAddress || '--:--:--:--:--:--',
+              ipAddress: msg.data.ip || 'Đang kết nối',
+              firmwareVersion: msg.data.firmwareVersion || '1.0.0-real',
+              status: 'ONLINE',
+              lastHeartbeat: msg.data.time || new Date().toISOString(),
+              nightFlashEnabled: false,
+              resolution: msg.data.resolution || 'QVGA',
+              freeHeap: Number(msg.data.freeHeap ?? 0),
+              freePsram: Number(msg.data.freePsram ?? 0),
+            };
+            setDevices((prev) => {
+              const exists = prev.some((d) => d.id === incomingDev.id);
+              if (exists) {
+                return prev.map((d) => (d.id === incomingDev.id ? { ...d, ...incomingDev } : d));
+              }
+              return [incomingDev, ...prev];
+            });
+            setSelectedDevice((prev) =>
+              prev.status === 'OFFLINE' || prev.id === incomingDev.id ? { ...prev, ...incomingDev } : prev,
             );
+          } else if (msg.event === 'image:new' && msg.data) {
+            const img = msg.data;
+            const newImg: ImageMeta = {
+              id: img.id || img.gridFsFileId,
+              deviceId: img.deviceId,
+              filename: img.filename || `${img.deviceId}_${Date.now()}.jpg`,
+              capturedAt: img.capturedAt || new Date().toISOString(),
+              expiresAt: img.expiresAt || new Date(Date.now() + 15 * 3600000).toISOString(),
+              sha256: img.sha256 || '',
+              dhash: img.dhash || img.perceptualHash || '',
+              sizeBytes: Number(img.sizeBytes ?? img.byteSize ?? 0),
+              width: Number(img.width ?? 320),
+              height: Number(img.height ?? 240),
+              isDuplicate: Boolean(img.isDuplicate),
+              hammingDistance: Number(img.hammingDistance ?? 0),
+              personDetected: Boolean(img.personDetected ?? img.isPerson ?? img.detectionSummary?.hasHuman),
+              confidence: Number(img.confidence ?? img.detectionSummary?.confidence ?? 0),
+              meanLuminance: Number(img.meanLuminance ?? 50),
+              isDark: Boolean(img.isDark ?? img.detectionSummary?.isDark),
+              detections: img.detections || [],
+            };
+            setImages((prev) => [newImg, ...prev.filter((x) => x.id !== newImg.id)]);
           }
         } catch (e) {
           // ignore non-json messages
@@ -83,60 +231,23 @@ export const App: React.FC = () => {
       console.warn('WebSocket connection fallback to polling mode');
     }
 
-    // Micro-jitter simulation for live hardware feedback in demo mode
-    const jitterTimer = setInterval(() => {
-      setHardwareTelemetry((prev) => ({
-        ...prev,
-        timestamp: new Date().toISOString(),
-        cpu: {
-          ...prev.cpu,
-          usagePercent: Math.min(100, Math.max(12, Number((18.5 + (Math.random() * 8 - 4)).toFixed(1)))),
-        },
-        uptimeSec: prev.uptimeSec + 2,
-      }));
-    }, 2000);
-
     return () => {
-      clearInterval(jitterTimer);
       if (ws) ws.close();
     };
-  }, []);
+  }, [fetchRealData]);
 
-  // Handlers
+  // Handlers calling 100% Real Backend APIs
   const handleInstantCapture = async () => {
-    const newImage: ImageMeta = {
-      id: `img-manual-${Date.now()}`,
-      deviceId: selectedDevice.id,
-      filename: `capture_manual_${Math.floor(Date.now() / 1000)}.jpg`,
-      capturedAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 15 * 3600000).toISOString(),
-      sha256: 'a1b2c3d4e5f67890123456789abcdef0123456789abcdef0123456789abcdef0',
-      dhash: '000c0e0e0e0e0c00',
-      sizeBytes: 42680,
-      width: 800,
-      height: 600,
-      isDuplicate: false,
-      hammingDistance: 0,
-      personDetected: true,
-      confidence: 0.965,
-      meanLuminance: 37.2,
-      isDark: true,
-      detections: [{ label: 'person', score: 0.965, box: [110, 45, 100, 165] }],
-    };
-
-    setImages((prev) => [newImage, ...prev]);
-
-    const newAudit: AuditEvent = {
-      id: `aud-${Date.now()}`,
-      action: 'MANUAL_CAPTURE',
-      actor: currentUser?.fullName || 'Admin_WebUI',
-      deviceId: selectedDevice.id,
-      details: 'Instant capture triggered manually. Frame stored in MongoDB GridFS.',
-      ipAddress: '127.0.0.1',
-      timestamp: new Date().toISOString(),
-      status: 'SUCCESS',
-    };
-    setAuditLogs((prev) => [newAudit, ...prev]);
+    try {
+      await fetch(`/api/devices/${selectedDevice.id}/commands/capture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ flashLed: selectedDevice.nightFlashEnabled }),
+      });
+      await fetchRealData();
+    } catch (e) {
+      // ignore network error
+    }
   };
 
   const handleToggleFlash = () => {
@@ -145,86 +256,58 @@ export const App: React.FC = () => {
     setDevices((prev) =>
       prev.map((d) => (d.id === selectedDevice.id ? { ...d, nightFlashEnabled: updated } : d)),
     );
-
-    const newAudit: AuditEvent = {
-      id: `aud-${Date.now()}`,
-      action: 'FLASH_CONFIG',
-      actor: currentUser?.fullName || 'Admin_WebUI',
-      deviceId: selectedDevice.id,
-      details: `Auto Night Flash set to ${updated ? 'ENABLED' : 'DISABLED'}.`,
-      ipAddress: '127.0.0.1',
-      timestamp: new Date().toISOString(),
-      status: 'SUCCESS',
-    };
-    setAuditLogs((prev) => [newAudit, ...prev]);
   };
 
   const handleSaveSchedule = async (newSchedule: ScheduleConfig) => {
     setSchedule(newSchedule);
-    const newAudit: AuditEvent = {
-      id: `aud-${Date.now()}`,
-      action: 'SCHEDULE_UPDATE',
-      actor: currentUser?.fullName || 'Admin_WebUI',
-      deviceId: selectedDevice.id,
-      details: `Schedule updated: interval=${newSchedule.intervalSeconds}s, window=${newSchedule.startTime}-${newSchedule.endTime}, offline=${newSchedule.offlinePolicy}`,
-      ipAddress: '127.0.0.1',
-      timestamp: new Date().toISOString(),
-      status: 'SUCCESS',
-    };
-    setAuditLogs((prev) => [newAudit, ...prev]);
+    try {
+      await fetch(`/api/devices/${selectedDevice.id}/schedule`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newSchedule),
+      });
+    } catch (e) {
+      // ignore
+    }
   };
 
   const handleDeleteImage = async (id: string) => {
+    try {
+      await fetch(`/api/images/${id}/delete`, { method: 'POST' });
+    } catch (e) {
+      // ignore
+    }
     setImages((prev) => prev.filter((i) => i.id !== id));
-    const newAudit: AuditEvent = {
-      id: `aud-${Date.now()}`,
-      action: 'IMAGE_MANUAL_DELETE',
-      actor: currentUser?.fullName || 'Admin_WebUI',
-      deviceId: selectedDevice.id,
-      details: `Image ID ${id} deleted permanently from MongoDB GridFS.`,
-      ipAddress: '127.0.0.1',
-      timestamp: new Date().toISOString(),
-      status: 'SUCCESS',
-    };
-    setAuditLogs((prev) => [newAudit, ...prev]);
   };
 
   const handleUpdatePolicy = async (p: RetentionPolicy) => {
     setRetentionPolicy(p);
-    const newAudit: AuditEvent = {
-      id: `aud-${Date.now()}`,
-      action: 'RETENTION_POLICY_UPDATE',
-      actor: currentUser?.fullName || 'Admin_WebUI',
-      details: `Retention policy updated: mode=${p.mode}, hours=${p.retentionHours}, cutoff=${p.dailyCutoffTime}`,
-      ipAddress: '127.0.0.1',
-      timestamp: new Date().toISOString(),
-      status: 'SUCCESS',
-    };
-    setAuditLogs((prev) => [newAudit, ...prev]);
+    try {
+      await fetch('/api/retention/policy', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(p),
+      });
+    } catch (e) {
+      // ignore
+    }
   };
 
   const handleTriggerPurgeNow = async () => {
-    const expiredCount = 12;
-    const freedBytes = 512000;
-    setRetentionPolicy((prev) => ({
-      ...prev,
-      totalPurgedCount: prev.totalPurgedCount + expiredCount,
-      totalPurgedBytes: prev.totalPurgedBytes + freedBytes,
-      lastPurgeAt: new Date().toISOString(),
-    }));
-
-    const newAudit: AuditEvent = {
-      id: `aud-${Date.now()}`,
-      action: 'RETENTION_PURGE_MANUAL',
-      actor: currentUser?.fullName || 'Admin_WebUI',
-      details: `Manual purge completed: ${expiredCount} expired items removed from GridFS (${(freedBytes / 1024).toFixed(1)} KB freed).`,
-      ipAddress: '127.0.0.1',
-      timestamp: new Date().toISOString(),
-      status: 'SUCCESS',
-    };
-    setAuditLogs((prev) => [newAudit, ...prev]);
-
-    return { purgedCount: expiredCount, purgedBytes: freedBytes };
+    try {
+      const res = await fetch('/api/retention/purge-now', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        await fetchRealData();
+        return {
+          purgedCount: data.purgedCount ?? 0,
+          purgedBytes: data.purgedBytes ?? 0,
+        };
+      }
+    } catch (e) {
+      // ignore
+    }
+    return { purgedCount: 0, purgedBytes: 0 };
   };
 
   const handleSendTestEmail = async (email: string) => {
@@ -241,9 +324,9 @@ export const App: React.FC = () => {
       // fallback
     }
     return {
-      success: true,
-      messageId: `gmail_api_${Date.now()}`,
-      simulated: true,
+      success: false,
+      messageId: '',
+      simulated: false,
     };
   };
 
@@ -251,13 +334,13 @@ export const App: React.FC = () => {
     <div className="min-h-screen bg-ocean-950 text-slate-100 flex flex-col font-sans">
       {/* Top Navbar with Google Sign-in */}
       <Navbar
-        devices={devices}
+        devices={devices.length > 0 ? devices : [WAITING_DEVICE]}
         selectedDevice={selectedDevice}
         onSelectDevice={setSelectedDevice}
         onOpenTerminal={() => setIsTerminalOpen(!isTerminalOpen)}
         isTerminalOpen={isTerminalOpen}
         onOpenFlasher={() => setIsWifiFlasherOpen(true)}
-        onRefresh={() => {}}
+        onRefresh={fetchRealData}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         user={currentUser}
@@ -265,8 +348,10 @@ export const App: React.FC = () => {
         onLogout={() => setCurrentUser(null)}
       />
 
-      {/* Demo Mode Notice */}
-      <DemoBanner onOpenFlasher={() => setIsWifiFlasherOpen(true)} />
+      {/* Only show connection guide banner if no physical ESP32-CAM is ONLINE yet */}
+      {selectedDevice.status !== 'ONLINE' && (
+        <DemoBanner onOpenFlasher={() => setIsWifiFlasherOpen(true)} />
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -282,16 +367,18 @@ export const App: React.FC = () => {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <div className="bg-ocean-900 border border-ocean-800 p-4 rounded-xl font-mono text-xs">
                 <span className="text-slate-400 block mb-1">MÔ HÌNH NHẬN DIỆN</span>
-                <span className="text-cyan-400 font-bold text-sm">TurboQuant INT4 + Pose</span>
-                <span className="text-[10px] text-slate-500 block mt-1">Độ chính xác: 97.8% | Tốc độ: x6.2</span>
+                <span className="text-cyan-400 font-bold text-sm">Edge Impulse + TurboQuant</span>
+                <span className="text-[10px] text-slate-500 block mt-1">
+                  Trạng thái: {selectedDevice.status === 'ONLINE' ? 'Đang nhận luồng thật' : 'Chờ ESP32-CAM kết nối'}
+                </span>
               </div>
               <div className="bg-ocean-900 border border-ocean-800 p-4 rounded-xl font-mono text-xs">
-                <span className="text-slate-400 block mb-1">PHẦN CỨNG ESP32</span>
+                <span className="text-slate-400 block mb-1">PHẦN CỨNG ESP32 THẬT</span>
                 <span className="text-emerald-400 font-bold text-sm">
                   CPU: {hardwareTelemetry.cpu.usagePercent}% | DRAM: {(hardwareTelemetry.dram.freeBytes / 1024).toFixed(0)}KB
                 </span>
                 <span className="text-[10px] text-slate-500 block mt-1">
-                  PSRAM Flam: {(hardwareTelemetry.psram.freeBytes / (1024 * 1024)).toFixed(1)}MB trống
+                  PSRAM Flam: {(hardwareTelemetry.psram.freeBytes / (1024 * 1024)).toFixed(2)}MB trống
                 </span>
               </div>
               <div className="bg-ocean-900 border border-ocean-800 p-4 rounded-xl font-mono text-xs">
@@ -348,7 +435,7 @@ export const App: React.FC = () => {
       <AuthModal
         isOpen={isAuthModalOpen}
         onClose={() => setIsAuthModalOpen(false)}
-        onAuthSuccess={(user, token) => setCurrentUser(user)}
+        onAuthSuccess={(user) => setCurrentUser(user)}
       />
 
       {/* Web Wi-Fi Flasher Modal via USB Serial */}
@@ -356,11 +443,7 @@ export const App: React.FC = () => {
         isOpen={isWifiFlasherOpen}
         onClose={() => setIsWifiFlasherOpen(false)}
         onSuccess={() => {
-          setDevices((prev) =>
-            prev.map((d) =>
-              d.id === selectedDevice.id ? { ...d, status: 'ONLINE', ipAddress: '192.168.1.145' } : d
-            )
-          );
+          fetchRealData();
         }}
       />
     </div>

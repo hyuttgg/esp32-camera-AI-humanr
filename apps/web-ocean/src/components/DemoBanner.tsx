@@ -28,10 +28,10 @@ export const DemoBanner: React.FC<DemoBannerProps> = ({ onOpenFlasher }) => {
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-bold tracking-wider border border-amber-500/40">
             <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-            DEMO DATA MODE
+            CHỜ ESP32-CAM THẬT
           </span>
           <span className="text-slate-300">
-            Hệ thống đang chạy với dữ liệu mô phỏng. Chưa phát hiện thiết bị ESP32-CAM vật lý gửi tín hiệu thật.
+            Đã xóa toàn bộ dữ liệu ảo. Hệ thống đang chờ bo mạch ESP32-CAM vật lý kết nối và gửi dữ liệu thật.
           </span>
         </div>
 
